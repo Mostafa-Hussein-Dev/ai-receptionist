@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(php artisan test:*)",
+      "Bash(test:*)",
+      "Bash(php artisan key:generate:*)",
+      "Bash(composer dump-autoload:*)",
+      "Bash(php -r:*)",
+      "Bash(composer show:*)",
+      "Bash(composer update:*)",
+      "Bash(mongod:*)",
+      "Bash(mongo:*)",
+      "Bash(php artisan:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
