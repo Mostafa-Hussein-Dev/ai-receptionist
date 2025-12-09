@@ -15,7 +15,6 @@ use Illuminate\Support\Facades\Log;
  *
  * Accuracy: 90-95%
  * Speed: 500ms-2s
- * Cost: ~$0.001 per request
  */
 class IntentParserService implements IntentParserServiceInterface
 {

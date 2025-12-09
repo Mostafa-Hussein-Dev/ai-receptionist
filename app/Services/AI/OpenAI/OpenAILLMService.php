@@ -15,7 +15,6 @@ use Illuminate\Support\Facades\Log;
  *
  * Accuracy: 90-95%
  * Speed: 500ms-2s
- * Cost: ~$0.001-0.002 per request
  *
  * Requires: composer require openai-php/laravel
  */
@@ -30,8 +29,8 @@ class OpenAILLMService implements LLMServiceInterface
 
     public function __construct()
     {
-        $this->model = config('ai.openai.model', 'gpt-4-turbo-preview');
-        $this->maxTokens = config('ai.openai.max_tokens', 500);
+        $this->model = config('ai.openai.model', 'gpt-5-nano');
+        $this->maxTokens = config('ai.openai.max_tokens', 1000);
         $this->temperature = config('ai.openai.temperature', 0.7);
         $this->timeout = config('ai.openai.timeout', 30);
         $this->maxRetries = config('ai.openai.max_retries', 2);
@@ -174,7 +173,7 @@ class OpenAILLMService implements LLMServiceInterface
 
             $content = $response->choices[0]->message->content ?? '';
 
-            // Clean response (remove markdown code blocks if present)
+            // Clean response (remove Markdown code blocks if present)
             $content = preg_replace('/```json\s*/', '', $content);
             $content = preg_replace('/```\s*/', '', $content);
             $content = trim($content);

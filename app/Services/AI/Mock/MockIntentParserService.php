@@ -36,7 +36,7 @@ class MockIntentParserService implements IntentParserServiceInterface
         $input = strtolower(trim($userMessage));
 
         if ($this->verbose) {
-            \Log::info('[MockIntentParser] Parsing', [
+            Log::info('[MockIntentParser] Parsing', [
                 'message' => $userMessage,
                 'context' => $context,
             ]);
@@ -46,7 +46,7 @@ class MockIntentParserService implements IntentParserServiceInterface
         $result = $this->detectIntent($input, $context);
 
         if ($this->verbose) {
-            \Log::info('[MockIntentParser] Result', [
+            Log::info('[MockIntentParser] Result', [
                 'intent' => $result->intent,
                 'confidence' => $result->confidence,
             ]);

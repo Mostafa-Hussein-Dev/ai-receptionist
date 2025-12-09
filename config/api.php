@@ -22,17 +22,9 @@ return [
 
         // Valid API keys
         // Generate secure keys: php artisan tinker -> Str::random(32)
-        'keys' => [
+        'keys' => array_filter([
             env('API_KEY_1', 'your-api-key-1'),
             env('API_KEY_2', 'your-api-key-2'),
-            env('API_KEY_3', 'your-api-key-3'),
-        ],
-
-        // Remove null/empty keys
-        'keys' => array_filter([
-            env('API_KEY_1'),
-            env('API_KEY_2'),
-            env('API_KEY_3'),
         ]),
     ],
 

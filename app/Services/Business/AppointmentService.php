@@ -68,6 +68,42 @@ class AppointmentService
     }
 
     /**
+     * Book appointment with named parameters (convenience method for API)
+     *
+     * @param int $patientId
+     * @param int $doctorId
+     * @param Carbon $date
+     * @param string $startTime
+     * @param int $slotCount
+     * @param string $type
+     * @param string|null $reason
+     * @param int|null $callId
+     * @return Appointment
+     * @throws AppointmentException
+     */
+    public function bookAppointmentDirect(
+        int $patientId,
+        int $doctorId,
+        Carbon $date,
+        string $startTime,
+        int $slotCount = 1,
+        string $type = 'general',
+        ?string $reason = null,
+        ?int $callId = null
+    ): Appointment {
+        return $this->bookAppointment([
+            'patientId' => $patientId,
+            'doctorId' => $doctorId,
+            'date' => $date,
+            'startTime' => $startTime,
+            'slotCount' => $slotCount,
+            'type' => $type,
+            'reason' => $reason,
+            'callId' => $callId,
+        ]);
+    }
+
+    /**
      * Cancel an appointment (immediate slot release)
      *
      * @throws AppointmentException
@@ -108,7 +144,8 @@ class AppointmentService
         int $appointmentId,
         Carbon|string $newDate,
         string $newStartTime,
-        ?int $newSlotCount = null
+        ?int $newSlotCount = null,
+        ?string $reason = null
     ): Appointment {
         // Convert string to Carbon if needed
         if (is_string($newDate)) {
@@ -137,7 +174,7 @@ class AppointmentService
             $slotCount
         );
 
-        return DB::transaction(function () use ($appointment, $newDate, $newStartTime, $slotCount) {
+        return DB::transaction(function () use ($appointment, $newDate, $newStartTime, $slotCount, $reason) {
             // Release old slots
             $this->slotService->releaseSlots($appointment->id);
 
@@ -152,6 +189,7 @@ class AppointmentService
                 'end_time' => $newEndTime,
                 'slot_count' => $slotCount,
                 'status' => 'scheduled', // Reset to scheduled
+                'notes' => $reason,
             ]);
 
             // Book new slots
@@ -174,6 +212,17 @@ class AppointmentService
     public function getAppointment(int $appointmentId): ?Appointment
     {
         return Appointment::with(['patient', 'doctor', 'slots'])->find($appointmentId);
+    }
+
+    /**
+     * Get appointment by ID (alias for getAppointment)
+     *
+     * @param int $id
+     * @return Appointment|null
+     */
+    public function getById(int $id): ?Appointment
+    {
+        return $this->getAppointment($id);
     }
 
     /**

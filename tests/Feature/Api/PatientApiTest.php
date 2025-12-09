@@ -1,8 +1,4 @@
 <?php
-// ============================================================================
-// FILE 4: PatientApiTest.php
-// Location: tests/Feature/Api/PatientApiTest.php
-// ============================================================================
 
 namespace Tests\Feature\Api;
 
@@ -15,6 +11,13 @@ class PatientApiTest extends TestCase
 {
     use RefreshDatabase;
 
+    protected function withApiKey(array $headers = [])
+    {
+        return array_merge([
+            'X-API-Key' => config('api.authentication.keys')[0],
+        ], $headers);
+    }
+
     #[Test]
     public function it_can_lookup_patient_by_phone()
     {
@@ -22,9 +25,10 @@ class PatientApiTest extends TestCase
             'phone' => '+15551234567',
         ]);
 
-        $response = $this->postJson('/api/v1/patients/lookup', [
-            'phone' => '+15551234567',
-        ]);
+        $response = $this->withHeaders($this->withApiKey())
+            ->postJson('/api/v1/patients/lookup', [
+                'phone' => '+15551234567',
+            ]);
 
         $response->assertStatus(200)
             ->assertJson([
@@ -40,9 +44,10 @@ class PatientApiTest extends TestCase
     #[Test]
     public function it_returns_not_found_for_nonexistent_patient()
     {
-        $response = $this->postJson('/api/v1/patients/lookup', [
-            'phone' => '+15559999999',
-        ]);
+        $response = $this->withHeaders($this->withApiKey())
+            ->postJson('/api/v1/patients/lookup', [
+                'phone' => '+15559999999',
+            ]);
 
         $response->assertStatus(200)
             ->assertJson([
@@ -55,7 +60,8 @@ class PatientApiTest extends TestCase
     #[Test]
     public function it_validates_lookup_request()
     {
-        $response = $this->postJson('/api/v1/patients/lookup', []);
+        $response = $this->withHeaders($this->withApiKey())
+            ->postJson('/api/v1/patients/lookup', []);
 
         $response->assertStatus(422)
             ->assertJsonValidationErrors(['phone']);

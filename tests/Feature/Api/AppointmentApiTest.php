@@ -21,25 +21,25 @@ class AppointmentApiTest extends TestCase
     public function it_can_book_appointment()
     {
         $department = Department::factory()->create();
-        $doctor = Doctor::factory()->create(['department_id' => $department->id]);
-        $patient = Patient::factory()->create();
 
-        $tomorrow = Carbon::tomorrow();
-        $dayOfWeek = $tomorrow->dayOfWeek;
-
-        DoctorSchedule::factory()->create([
-            'doctor_id' => $doctor->id,
-            'day_of_week' => $dayOfWeek,
-            'is_available' => true,
+        $doctor = Doctor::factory()->withoutSchedule()->create([
+            'department_id' => $department->id
         ]);
 
-        // Generate slots
-        app(SlotService::class)->generateSlotsForDate($doctor->id, $tomorrow);
+        $patient = Patient::factory()->create();
 
-        $response = $this->postJson('/api/v1/appointments', [
+        // Always use a weekday to ensure deterministic behavior
+        $date = Carbon::now()->next(Carbon::MONDAY);
+
+        // Generate slots (will auto-create schedule if missing)
+        app(SlotService::class)->generateSlotsForDate($doctor->id, $date);
+
+        $response = $this->withHeaders([
+            'X-API-Key' => config('api.authentication.keys')[0],
+        ])->postJson('/api/v1/appointments', [
             'patient_id' => $patient->id,
             'doctor_id' => $doctor->id,
-            'date' => $tomorrow->format('Y-m-d'),
+            'date' => $date->format('Y-m-d'),
             'start_time' => '09:00',
             'slot_count' => 2,
         ]);
@@ -61,27 +61,29 @@ class AppointmentApiTest extends TestCase
     public function it_can_cancel_appointment()
     {
         $department = Department::factory()->create();
-        $doctor = Doctor::factory()->create(['department_id' => $department->id]);
-        $patient = Patient::factory()->create();
-        $tomorrow = Carbon::tomorrow();
-        $dayOfWeek = $tomorrow->dayOfWeek;
 
-        DoctorSchedule::factory()->create([
-            'doctor_id' => $doctor->id,
-            'day_of_week' => $dayOfWeek,
+        $doctor = Doctor::factory()->withoutSchedule()->create([
+            'department_id' => $department->id
         ]);
 
-        app(SlotService::class)->generateSlotsForDate($doctor->id, $tomorrow);
+        $patient = Patient::factory()->create();
 
-        $appointment = app(\App\Services\Business\AppointmentService::class)->bookAppointment(
-            $patient->id,
-            $doctor->id,
-            $tomorrow,
-            '09:00',
-            2
-        );
+        // Always use next Monday to avoid weekend logic
+        $date = Carbon::now()->next(Carbon::MONDAY);
 
-        $response = $this->putJson("/api/v1/appointments/{$appointment->id}/cancel", [
+        app(SlotService::class)->generateSlotsForDate($doctor->id, $date);
+
+        $appointment = app(\App\Services\Business\AppointmentService::class)->bookAppointment([
+            'patient_id' => $patient->id,
+            'doctor_id' => $doctor->id,
+            'date' => $date->format('Y-m-d'),
+            'start_time' => '09:00',
+            'slot_count' => 2,
+        ]);
+
+        $response = $this->withHeaders([
+            'X-API-Key' => config('api.authentication.keys')[0],
+        ])->putJson("/api/v1/appointments/{$appointment->id}/cancel", [
             'cancellation_reason' => 'Changed plans',
         ]);
 
@@ -100,7 +102,9 @@ class AppointmentApiTest extends TestCase
     #[Test]
     public function it_validates_booking_request()
     {
-        $response = $this->postJson('/api/v1/appointments', []);
+        $response = $this->withHeaders([
+            'X-API-Key' => config('api.authentication.keys')[0],
+        ])->postJson('/api/v1/appointments', []);
 
         $response->assertStatus(422)
             ->assertJsonValidationErrors(['patient_id', 'doctor_id', 'date', 'start_time']);

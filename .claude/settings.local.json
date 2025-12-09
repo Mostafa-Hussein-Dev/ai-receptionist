@@ -10,7 +10,12 @@
       "Bash(composer update:*)",
       "Bash(mongod:*)",
       "Bash(mongo:*)",
-      "Bash(php artisan:*)"
+      "Bash(php artisan:*)",
+      "Bash(curl:*)",
+      "Bash(redis-cli ping:*)",
+      "Bash(php -m:*)",
+      "Bash(php -i:*)",
+      "Bash(grep:*)"
     ],
     "deny": [],
     "ask": []

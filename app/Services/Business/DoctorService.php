@@ -26,11 +26,36 @@ class DoctorService
     }
 
     /**
+     * Get all active doctors
+     *
+     * @return Collection
+     */
+    public function getAllActive(): Collection
+    {
+        return Doctor::where('is_active', true)
+            ->with('department')
+            ->orderBy('last_name')
+            ->orderBy('first_name')
+            ->get();
+    }
+
+    /**
      * Get doctor by ID
      */
     public function getDoctor(int $id): ?Doctor
     {
         return Doctor::with(['department', 'schedules', 'scheduleExceptions'])->find($id);
+    }
+
+    /**
+     * Get doctor by ID with department relationship
+     *
+     * @param int $id
+     * @return Doctor|null
+     */
+    public function getById(int $id): ?Doctor
+    {
+        return Doctor::with('department')->find($id);
     }
 
     /**
@@ -253,6 +278,35 @@ class DoctorService
             ->exists();
 
         return $schedule;
+    }
+
+    /**
+     * Check if doctor is available on a specific date
+     *
+     * @param int $doctorId
+     * @param Carbon $date
+     * @return bool
+     */
+    public function isAvailable(int $doctorId, Carbon $date): bool
+    {
+        $doctor = Doctor::find($doctorId);
+
+        if (!$doctor || !$doctor->is_active) {
+            return false;
+        }
+
+        // Check if weekend
+        if ($date->isWeekend()) {
+            return false;
+        }
+
+        // Check doctor schedule for this day of week
+        $schedule = DoctorSchedule::where('doctor_id', $doctorId)
+            ->where('day_of_week', $date->dayOfWeek)
+            ->where('is_available', true)
+            ->first();
+
+        return $schedule !== null;
     }
 
     /**

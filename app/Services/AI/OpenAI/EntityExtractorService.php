@@ -15,7 +15,6 @@ use Illuminate\Support\Facades\Log;
  *
  * Accuracy: 85-90%
  * Speed: 500ms-2s
- * Cost: ~$0.001 per request
  */
 class EntityExtractorService implements EntityExtractorServiceInterface
 {
@@ -163,13 +162,13 @@ Rules:
 2. Use null for entities that are not mentioned
 3. Format dates as YYYY-MM-DD
 4. Format times as HH:MM in 24-hour format
-5. Include country code for phone numbers (assume +1 if not specified)
+5. Include country code for phone numbers (assume +961 if not specified)
 6. Return JSON with this exact structure:
    {
-     "patient_name": "John Smith" or null,
+     "patient_name": "John Doe" or null,
      "date": "2024-01-20" or null,
      "time": "14:30" or null,
-     "phone": "+1234567890" or null,
+     "phone": "+96123456789" or null,
      "date_of_birth": "1980-03-15" or null,
      "doctor_name": "Dr. Smith" or null,
      "department": "Cardiology" or null

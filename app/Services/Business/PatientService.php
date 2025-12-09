@@ -9,23 +9,66 @@ use Illuminate\Support\Collection;
 class PatientService
 {
     /**
-     * Lookup patient by phone number
-     * Returns all patients with matching phone
+     * Lookup patients by phone number (returns collection to support multiple matches)
+     *
+     * @param string $phone
+     * @return Collection
      */
     public function lookupByPhone(string $phone): Collection
     {
-        // Normalize phone number (remove spaces, dashes, etc.)
-        $normalizedPhone = preg_replace('/[^0-9+]/', '', $phone);
+        // Clean phone number (remove non-numeric characters except +)
+        $cleanPhone = preg_replace('/[^0-9+]/', '', $phone);
 
-        return Patient::where('phone', 'LIKE', "%{$normalizedPhone}%")
+        return Patient::where('phone', $cleanPhone)
             ->get();
     }
 
     /**
-     * Lookup patient by phone and verify with name
-     * This is the primary lookup method for the conversation flow
+     * Get single patient by phone (returns first match or null)
+     *
+     * @param string $phone
+     * @return Patient|null
      */
-    public function lookupByPhoneAndName(string $phone, string $firstName, string $lastName): ?Patient
+    public function getByPhone(string $phone): ?Patient
+    {
+        return $this->lookupByPhone($phone)->first();
+    }
+
+    /**
+     * Lookup patient by phone number and name
+     *
+     * @param string $phone
+     * @param string $name
+     * @return Patient|null
+     */
+    public function lookupByPhoneAndName(string $phone, string $name): ?Patient
+    {
+        // Clean phone number (remove non-numeric characters except +)
+        $cleanPhone = preg_replace('/[^0-9+]/', '', $phone);
+
+        // Parse name (try to split into first/last)
+        $nameParts = explode(' ', trim($name), 2);
+        $firstName = $nameParts[0] ?? '';
+        $lastName = $nameParts[1] ?? '';
+
+        $query = Patient::where('phone', $cleanPhone);
+
+        if ($firstName) {
+            $query->where('first_name', 'LIKE', $firstName . '%');
+        }
+
+        if ($lastName) {
+            $query->where('last_name', 'LIKE', $lastName . '%');
+        }
+
+        return $query->first();
+    }
+
+    /**
+     * Lookup patient by phone and verify with separate first/last name
+     * This is a helper method for the conversation flow (kept for backward compatibility)
+     */
+    public function lookupByPhoneAndFullName(string $phone, string $firstName, string $lastName): ?Patient
     {
         $patients = $this->lookupByPhone($phone);
 
@@ -151,7 +194,7 @@ class PatientService
     public function findOrCreate(array $data): Patient
     {
         // First try to find by phone and name
-        $existing = $this->lookupByPhoneAndName(
+        $existing = $this->lookupByPhoneAndFullName(
             $data['phone'],
             $data['first_name'],
             $data['last_name']
@@ -171,7 +214,7 @@ class PatientService
      */
     public function verifyIdentity(string $phone, string $firstName, string $lastName): array
     {
-        $patient = $this->lookupByPhoneAndName($phone, $firstName, $lastName);
+        $patient = $this->lookupByPhoneAndFullName($phone, $firstName, $lastName);
 
         return [
             'verified' => $patient !== null,

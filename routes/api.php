@@ -12,23 +12,32 @@ use App\Http\Controllers\Api\{
     PatientController
 };
 
+// ============================================================================
+// PUBLIC ROUTES (no authentication required)
+// ============================================================================
 Route::prefix('v1')->group(function () {
 
-    // Doctors
+    // Doctors - Public
     Route::get('/doctors', [DoctorController::class, 'index']);
     Route::get('/doctors/{id}', [DoctorController::class, 'show']);
     Route::get('/doctors/{id}/availability', [DoctorController::class, 'availability']);
 
-    // Slots
+    // Slots - Public
     Route::get('/slots', [SlotController::class, 'index']);
+});
 
-    // Appointments
+// ============================================================================
+// PROTECTED ROUTES (require API key authentication)
+// ============================================================================
+Route::middleware(['api.key'])->prefix('v1')->group(function () {
+
+    // Appointments - Protected
     Route::post('/appointments', [AppointmentController::class, 'store']);
     Route::get('/appointments/{id}', [AppointmentController::class, 'show']);
     Route::put('/appointments/{id}/cancel', [AppointmentController::class, 'cancel']);
     Route::put('/appointments/{id}/reschedule', [AppointmentController::class, 'reschedule']);
 
-    // Patients
+    // Patients - Protected
     Route::post('/patients/lookup', [PatientController::class, 'lookup']);
 });
 

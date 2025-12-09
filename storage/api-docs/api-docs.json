@@ -1,0 +1,1059 @@
+{
+    "openapi": "3.0.0",
+    "info": {
+        "title": "AI Receptionist API",
+        "description": "AI-powered voice receptionist system for hospital appointment management. This API handles doctor schedules, patient information, appointment booking, and slot management. Some endpoints require API key authentication via the X-API-Key header (appointments and patient lookup).",
+        "contact": {
+            "name": "API Support",
+            "email": "support@hospital.com"
+        },
+        "version": "1.0.0"
+    },
+    "servers": [
+        {
+            "url": "http://127.0.0.1:8000",
+            "description": "Local Development Server"
+        },
+        {
+            "url": "http://localhost:8000",
+            "description": "Alternative Local Server"
+        }
+    ],
+    "paths": {
+        "/api/v1/appointments": {
+            "post": {
+                "tags": [
+                    "Appointments"
+                ],
+                "summary": "Book new appointment",
+                "description": "Create a new appointment for a patient with a doctor",
+                "operationId": "cd3cb3979bc60c0895c61ab950086885",
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "required": [
+                                    "patient_id",
+                                    "doctor_id",
+                                    "date",
+                                    "start_time"
+                                ],
+                                "properties": {
+                                    "patient_id": {
+                                        "description": "Patient ID",
+                                        "type": "integer",
+                                        "example": 7
+                                    },
+                                    "doctor_id": {
+                                        "description": "Doctor ID",
+                                        "type": "integer",
+                                        "example": 3
+                                    },
+                                    "date": {
+                                        "description": "Appointment date",
+                                        "type": "string",
+                                        "format": "date",
+                                        "example": "2025-12-09"
+                                    },
+                                    "start_time": {
+                                        "description": "Start time in HH:MM format",
+                                        "type": "string",
+                                        "format": "time",
+                                        "example": "08:00"
+                                    },
+                                    "slot_count": {
+                                        "description": "Number of consecutive slots (default: 1)",
+                                        "type": "integer",
+                                        "example": 2
+                                    },
+                                    "type": {
+                                        "description": "Appointment type (default: general)",
+                                        "type": "string",
+                                        "example": "general"
+                                    },
+                                    "reason": {
+                                        "description": "Reason for appointment",
+                                        "type": "string",
+                                        "example": "Annual checkup"
+                                    }
+                                },
+                                "type": "object"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "201": {
+                        "description": "Appointment created successfully",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "properties": {
+                                        "success": {
+                                            "type": "boolean",
+                                            "example": true
+                                        },
+                                        "message": {
+                                            "type": "string",
+                                            "example": "Appointment booked successfully"
+                                        },
+                                        "data": {
+                                            "properties": {
+                                                "id": {
+                                                    "type": "integer",
+                                                    "example": 8
+                                                },
+                                                "patient_id": {
+                                                    "type": "integer",
+                                                    "example": 7
+                                                },
+                                                "doctor_id": {
+                                                    "type": "integer",
+                                                    "example": 3
+                                                },
+                                                "date": {
+                                                    "type": "string",
+                                                    "format": "date",
+                                                    "example": "2025-12-09"
+                                                },
+                                                "start_time": {
+                                                    "type": "string",
+                                                    "format": "time",
+                                                    "example": "08:00:00"
+                                                },
+                                                "end_time": {
+                                                    "type": "string",
+                                                    "format": "time",
+                                                    "example": "08:30:00"
+                                                },
+                                                "status": {
+                                                    "type": "string",
+                                                    "example": "scheduled"
+                                                },
+                                                "type": {
+                                                    "type": "string",
+                                                    "example": "general"
+                                                }
+                                            },
+                                            "type": "object"
+                                        }
+                                    },
+                                    "type": "object"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Booking failed",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "Validation error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "ApiKeyAuth": []
+                    }
+                ]
+            }
+        },
+        "/api/v1/appointments/{id}": {
+            "get": {
+                "tags": [
+                    "Appointments"
+                ],
+                "summary": "Get appointment details",
+                "description": "Retrieve detailed information about a specific appointment",
+                "operationId": "c9acb0dd9763645e9b48466da7120446",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "description": "Appointment ID",
+                        "required": true,
+                        "schema": {
+                            "type": "integer",
+                            "example": 8
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Successful operation",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "properties": {
+                                        "success": {
+                                            "type": "boolean",
+                                            "example": true
+                                        },
+                                        "data": {
+                                            "properties": {
+                                                "id": {
+                                                    "type": "integer",
+                                                    "example": 8
+                                                },
+                                                "patient": {
+                                                    "properties": {
+                                                        "id": {
+                                                            "type": "integer",
+                                                            "example": 7
+                                                        },
+                                                        "name": {
+                                                            "type": "string",
+                                                            "example": "Jane Doe"
+                                                        }
+                                                    },
+                                                    "type": "object"
+                                                },
+                                                "doctor": {
+                                                    "properties": {
+                                                        "id": {
+                                                            "type": "integer",
+                                                            "example": 3
+                                                        },
+                                                        "name": {
+                                                            "type": "string",
+                                                            "example": "John Smith"
+                                                        }
+                                                    },
+                                                    "type": "object"
+                                                },
+                                                "date": {
+                                                    "type": "string",
+                                                    "format": "date",
+                                                    "example": "2025-12-09"
+                                                },
+                                                "start_time": {
+                                                    "type": "string",
+                                                    "format": "time",
+                                                    "example": "08:00:00"
+                                                },
+                                                "end_time": {
+                                                    "type": "string",
+                                                    "format": "time",
+                                                    "example": "08:30:00"
+                                                },
+                                                "slot_count": {
+                                                    "type": "integer",
+                                                    "example": 2
+                                                },
+                                                "status": {
+                                                    "type": "string",
+                                                    "example": "scheduled"
+                                                },
+                                                "type": {
+                                                    "type": "string",
+                                                    "example": "general"
+                                                },
+                                                "reason": {
+                                                    "type": "string",
+                                                    "example": "Annual checkup"
+                                                }
+                                            },
+                                            "type": "object"
+                                        }
+                                    },
+                                    "type": "object"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Appointment not found",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "ApiKeyAuth": []
+                    }
+                ]
+            }
+        },
+        "/api/v1/appointments/{id}/cancel": {
+            "put": {
+                "tags": [
+                    "Appointments"
+                ],
+                "summary": "Cancel appointment",
+                "description": "Cancel an existing appointment",
+                "operationId": "8b2b97d5596ec045c7fb421e898c6c8b",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "description": "Appointment ID",
+                        "required": true,
+                        "schema": {
+                            "type": "integer",
+                            "example": 8
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "required": [
+                                    "cancellation_reason"
+                                ],
+                                "properties": {
+                                    "cancellation_reason": {
+                                        "description": "Reason for cancellation",
+                                        "type": "string",
+                                        "example": "Patient requested cancellation"
+                                    }
+                                },
+                                "type": "object"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Appointment cancelled successfully",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "properties": {
+                                        "success": {
+                                            "type": "boolean",
+                                            "example": true
+                                        },
+                                        "message": {
+                                            "type": "string",
+                                            "example": "Appointment cancelled successfully"
+                                        },
+                                        "data": {
+                                            "properties": {
+                                                "id": {
+                                                    "type": "integer",
+                                                    "example": 8
+                                                },
+                                                "status": {
+                                                    "type": "string",
+                                                    "example": "cancelled"
+                                                },
+                                                "cancelled_at": {
+                                                    "type": "string",
+                                                    "format": "date-time",
+                                                    "example": "2025-12-05T10:24:12.000000Z"
+                                                }
+                                            },
+                                            "type": "object"
+                                        }
+                                    },
+                                    "type": "object"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Cancellation failed",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "Validation error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "ApiKeyAuth": []
+                    }
+                ]
+            }
+        },
+        "/api/v1/appointments/{id}/reschedule": {
+            "put": {
+                "tags": [
+                    "Appointments"
+                ],
+                "summary": "Reschedule appointment",
+                "description": "Change the date and time of an existing appointment",
+                "operationId": "f69a15a5d1fdfc8329c772dd550ac475",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "description": "Appointment ID",
+                        "required": true,
+                        "schema": {
+                            "type": "integer",
+                            "example": 8
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "required": [
+                                    "new_date",
+                                    "new_start_time"
+                                ],
+                                "properties": {
+                                    "new_date": {
+                                        "description": "New appointment date",
+                                        "type": "string",
+                                        "format": "date",
+                                        "example": "2025-12-09"
+                                    },
+                                    "new_start_time": {
+                                        "description": "New start time in HH:MM format",
+                                        "type": "string",
+                                        "format": "time",
+                                        "example": "10:00"
+                                    }
+                                },
+                                "type": "object"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Appointment rescheduled successfully",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "properties": {
+                                        "success": {
+                                            "type": "boolean",
+                                            "example": true
+                                        },
+                                        "message": {
+                                            "type": "string",
+                                            "example": "Appointment rescheduled successfully"
+                                        },
+                                        "data": {
+                                            "properties": {
+                                                "id": {
+                                                    "type": "integer",
+                                                    "example": 8
+                                                },
+                                                "date": {
+                                                    "type": "string",
+                                                    "format": "date",
+                                                    "example": "2025-12-09"
+                                                },
+                                                "start_time": {
+                                                    "type": "string",
+                                                    "format": "time",
+                                                    "example": "10:00:00"
+                                                },
+                                                "end_time": {
+                                                    "type": "string",
+                                                    "format": "time",
+                                                    "example": "10:30:00"
+                                                }
+                                            },
+                                            "type": "object"
+                                        }
+                                    },
+                                    "type": "object"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Rescheduling failed",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "Validation error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "ApiKeyAuth": []
+                    }
+                ]
+            }
+        },
+        "/api/v1/doctors": {
+            "get": {
+                "tags": [
+                    "Doctors"
+                ],
+                "summary": "Get all active doctors",
+                "description": "Retrieve a list of all active doctors in the system",
+                "operationId": "fd1c6d99d521da6192ba5d500a751c0c",
+                "responses": {
+                    "200": {
+                        "description": "Successful operation",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "properties": {
+                                        "success": {
+                                            "type": "boolean",
+                                            "example": true
+                                        },
+                                        "data": {
+                                            "type": "array",
+                                            "items": {
+                                                "properties": {
+                                                    "id": {
+                                                        "type": "integer",
+                                                        "example": 3
+                                                    },
+                                                    "name": {
+                                                        "type": "string",
+                                                        "example": "John Smith"
+                                                    },
+                                                    "specialization": {
+                                                        "type": "string",
+                                                        "example": "General Practitioner"
+                                                    },
+                                                    "department": {
+                                                        "type": "string",
+                                                        "example": "General Medicine"
+                                                    },
+                                                    "slots_per_appointment": {
+                                                        "type": "integer",
+                                                        "example": 2
+                                                    }
+                                                },
+                                                "type": "object"
+                                            }
+                                        }
+                                    },
+                                    "type": "object"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/doctors/{id}": {
+            "get": {
+                "tags": [
+                    "Doctors"
+                ],
+                "summary": "Get doctor details",
+                "description": "Retrieve detailed information about a specific doctor",
+                "operationId": "37105695af3266d77b88e448686570c9",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "description": "Doctor ID",
+                        "required": true,
+                        "schema": {
+                            "type": "integer",
+                            "example": 3
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Successful operation",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "properties": {
+                                        "success": {
+                                            "type": "boolean",
+                                            "example": true
+                                        },
+                                        "data": {
+                                            "properties": {
+                                                "id": {
+                                                    "type": "integer",
+                                                    "example": 3
+                                                },
+                                                "first_name": {
+                                                    "type": "string",
+                                                    "example": "John"
+                                                },
+                                                "last_name": {
+                                                    "type": "string",
+                                                    "example": "Smith"
+                                                },
+                                                "email": {
+                                                    "type": "string",
+                                                    "example": "dr.smith@hospital.com"
+                                                },
+                                                "phone": {
+                                                    "type": "string",
+                                                    "example": "+1234567890"
+                                                },
+                                                "specialization": {
+                                                    "type": "string",
+                                                    "example": "General Practitioner"
+                                                },
+                                                "department": {
+                                                    "type": "string",
+                                                    "example": "General Medicine"
+                                                },
+                                                "slots_per_appointment": {
+                                                    "type": "integer",
+                                                    "example": 2
+                                                },
+                                                "max_appointments_per_day": {
+                                                    "type": "integer",
+                                                    "example": 12
+                                                },
+                                                "is_active": {
+                                                    "type": "boolean",
+                                                    "example": true
+                                                }
+                                            },
+                                            "type": "object"
+                                        }
+                                    },
+                                    "type": "object"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Doctor not found",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/doctors/{id}/availability": {
+            "get": {
+                "tags": [
+                    "Doctors"
+                ],
+                "summary": "Check doctor availability",
+                "description": "Check if a doctor is available on a specific date",
+                "operationId": "c376af00b4a530d40e269df870f1cd4b",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "description": "Doctor ID",
+                        "required": true,
+                        "schema": {
+                            "type": "integer",
+                            "example": 3
+                        }
+                    },
+                    {
+                        "name": "date",
+                        "in": "query",
+                        "description": "Date to check availability (YYYY-MM-DD)",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "format": "date",
+                            "example": "2025-12-09"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Availability checked successfully",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "oneOf": [
+                                        {
+                                            "properties": {
+                                                "success": {
+                                                    "type": "boolean",
+                                                    "example": true
+                                                },
+                                                "available": {
+                                                    "type": "boolean",
+                                                    "example": true
+                                                }
+                                            },
+                                            "type": "object"
+                                        },
+                                        {
+                                            "properties": {
+                                                "success": {
+                                                    "type": "boolean",
+                                                    "example": true
+                                                },
+                                                "available": {
+                                                    "type": "boolean",
+                                                    "example": false
+                                                },
+                                                "message": {
+                                                    "type": "string",
+                                                    "example": "Doctor is not available on this date"
+                                                }
+                                            },
+                                            "type": "object"
+                                        }
+                                    ]
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "Validation error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/patients/lookup": {
+            "post": {
+                "tags": [
+                    "Patients"
+                ],
+                "summary": "Lookup patient by phone or name",
+                "description": "Search for existing patient records by phone number and/or name",
+                "operationId": "d6f340f728ed68c5541976604803df42",
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "required": [
+                                    "phone"
+                                ],
+                                "properties": {
+                                    "phone": {
+                                        "description": "Patient phone number",
+                                        "type": "string",
+                                        "example": "+1987654321"
+                                    },
+                                    "name": {
+                                        "description": "Patient full name (optional, for verification)",
+                                        "type": "string",
+                                        "example": "Jane Doe"
+                                    }
+                                },
+                                "type": "object"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Lookup completed (patient may or may not be found)",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "properties": {
+                                        "success": {
+                                            "type": "boolean",
+                                            "example": true
+                                        },
+                                        "found": {
+                                            "description": "True if patient found, false otherwise",
+                                            "type": "boolean",
+                                            "example": true
+                                        },
+                                        "data": {
+                                            "description": "Patient data if found, null otherwise",
+                                            "oneOf": [
+                                                {
+                                                    "properties": {
+                                                        "id": {
+                                                            "type": "integer",
+                                                            "example": 7
+                                                        },
+                                                        "mrn": {
+                                                            "type": "string",
+                                                            "example": "MRN000007"
+                                                        },
+                                                        "first_name": {
+                                                            "type": "string",
+                                                            "example": "Jane"
+                                                        },
+                                                        "last_name": {
+                                                            "type": "string",
+                                                            "example": "Doe"
+                                                        },
+                                                        "phone": {
+                                                            "type": "string",
+                                                            "example": "+1987654321"
+                                                        },
+                                                        "date_of_birth": {
+                                                            "type": "string",
+                                                            "format": "date",
+                                                            "example": "1990-05-15"
+                                                        }
+                                                    },
+                                                    "type": "object"
+                                                },
+                                                {
+                                                    "type": "null"
+                                                }
+                                            ]
+                                        }
+                                    },
+                                    "type": "object"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Bad request",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "Validation error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "ApiKeyAuth": []
+                    }
+                ]
+            }
+        },
+        "/api/v1/slots": {
+            "get": {
+                "tags": [
+                    "Slots"
+                ],
+                "summary": "Get available time slots",
+                "description": "Retrieve available appointment time slots for a specific doctor and date. Supports consecutive slot booking.",
+                "operationId": "b22f783aa5a09a5b7914cffba18b82c6",
+                "parameters": [
+                    {
+                        "name": "doctor_id",
+                        "in": "query",
+                        "description": "Doctor ID",
+                        "required": true,
+                        "schema": {
+                            "type": "integer",
+                            "example": 3
+                        }
+                    },
+                    {
+                        "name": "date",
+                        "in": "query",
+                        "description": "Date for slot availability (YYYY-MM-DD)",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "format": "date",
+                            "example": "2025-12-09"
+                        }
+                    },
+                    {
+                        "name": "slot_count",
+                        "in": "query",
+                        "description": "Number of consecutive slots needed (1-4)",
+                        "required": false,
+                        "schema": {
+                            "type": "integer",
+                            "maximum": 4,
+                            "minimum": 1,
+                            "example": 1
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Successful operation",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "properties": {
+                                        "success": {
+                                            "type": "boolean",
+                                            "example": true
+                                        },
+                                        "data": {
+                                            "type": "array",
+                                            "items": {
+                                                "properties": {
+                                                    "id": {
+                                                        "type": "integer",
+                                                        "example": 1105
+                                                    },
+                                                    "date": {
+                                                        "type": "string",
+                                                        "format": "date",
+                                                        "example": "2025-12-09"
+                                                    },
+                                                    "start_time": {
+                                                        "type": "string",
+                                                        "format": "time",
+                                                        "example": "08:00:00"
+                                                    },
+                                                    "end_time": {
+                                                        "type": "string",
+                                                        "format": "time",
+                                                        "example": "08:15:00"
+                                                    },
+                                                    "slot_number": {
+                                                        "type": "integer",
+                                                        "example": 1
+                                                    },
+                                                    "status": {
+                                                        "type": "string",
+                                                        "example": "available"
+                                                    }
+                                                },
+                                                "type": "object"
+                                            }
+                                        },
+                                        "meta": {
+                                            "properties": {
+                                                "doctor_id": {
+                                                    "type": "string",
+                                                    "example": "3"
+                                                },
+                                                "date": {
+                                                    "type": "string",
+                                                    "example": "2025-12-09"
+                                                },
+                                                "slot_count_requested": {
+                                                    "type": "integer",
+                                                    "example": 1
+                                                },
+                                                "total_available": {
+                                                    "type": "integer",
+                                                    "example": 24
+                                                }
+                                            },
+                                            "type": "object"
+                                        }
+                                    },
+                                    "type": "object"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "Validation error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "components": {
+        "schemas": {
+            "ErrorResponse": {
+                "properties": {
+                    "success": {
+                        "type": "boolean",
+                        "example": false
+                    },
+                    "error": {
+                        "type": "string",
+                        "example": "Error message"
+                    },
+                    "message": {
+                        "type": "string",
+                        "example": "Validation error message"
+                    }
+                },
+                "type": "object"
+            }
+        },
+        "securitySchemes": {
+            "ApiKeyAuth": {
+                "type": "apiKey",
+                "description": "API Key authentication. Use one of the configured API keys in the X-API-Key header.",
+                "name": "X-API-Key",
+                "in": "header"
+            }
+        }
+    },
+    "tags": [
+        {
+            "name": "Doctors",
+            "description": "Doctor management and availability endpoints"
+        },
+        {
+            "name": "Patients",
+            "description": "Patient lookup and management endpoints"
+        },
+        {
+            "name": "Slots",
+            "description": "Available time slot management endpoints"
+        },
+        {
+            "name": "Appointments",
+            "description": "Appointment booking and management endpoints"
+        }
+    ]
+}

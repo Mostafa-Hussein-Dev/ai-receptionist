@@ -12,6 +12,7 @@ use App\Models\PostgreSQL\Department;
 use App\Models\PostgreSQL\Patient;
 use App\Models\PostgreSQL\Appointment;
 use App\Models\PostgreSQL\DoctorSchedule;
+use App\Models\PostgreSQL\Slot;
 use Carbon\Carbon;
 use App\Exceptions\SlotException;
 
@@ -28,33 +29,40 @@ class AppointmentServiceTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
+
         $this->appointmentService = app(AppointmentService::class);
-        $this->slotService = app(SlotService::class);
+        $this->slotService        = app(SlotService::class);
 
         // Create test data
         $department = Department::factory()->create();
+
+        // Let factory create the normal weekly schedule (Mon–Fri)
         $this->doctor = Doctor::factory()->create([
-            'department_id' => $department->id,
+            'department_id'         => $department->id,
             'slots_per_appointment' => 2,
         ]);
+
         $this->patient = Patient::factory()->create();
 
-        // Get next weekday
-        $this->testDate = Carbon::today();
+        // 🔑 IMPORTANT:
+        // Use *tomorrow* as the test date so we never violate the
+        // "at least 2 hours notice" rule. If tomorrow is weekend,
+        // push to next Monday.
+        $this->testDate = Carbon::tomorrow();
         if ($this->testDate->isWeekend()) {
             $this->testDate = $this->testDate->next(Carbon::MONDAY);
         }
 
-        // Update existing doctor schedule for this day
+        // Make sure the doctor's schedule for this weekday is 08:00–14:00
         DoctorSchedule::where('doctor_id', $this->doctor->id)
             ->where('day_of_week', $this->testDate->dayOfWeek)
             ->update([
-                'start_time' => '08:00:00',
-                'end_time' => '14:00:00',
+                'start_time'   => '08:00:00',
+                'end_time'     => '14:00:00',
                 'is_available' => true,
             ]);
 
-        // Generate slots
+        // Generate slots for that date based on schedule
         $this->slotService->generateSlotsForDate($this->doctor->id, $this->testDate);
     }
 
@@ -63,11 +71,11 @@ class AppointmentServiceTest extends TestCase
     {
         // Arrange
         $data = [
-            'patient_id' => $this->patient->id,
-            'doctor_id' => $this->doctor->id,
-            'date' => $this->testDate->toDateString(),
-            'preferred_time' => '09:00',
-            'type' => 'general',
+            'patient_id'     => $this->patient->id,
+            'doctor_id'      => $this->doctor->id,
+            'date'           => $this->testDate->toDateString(),
+            'preferred_time' => '09:00',    // inside 08:00–14:00 window
+            'type'           => 'general',
         ];
 
         // Act
@@ -86,9 +94,9 @@ class AppointmentServiceTest extends TestCase
     {
         // Arrange
         $data = [
-            'patient_id' => $this->patient->id,
-            'doctor_id' => $this->doctor->id,
-            'date' => $this->testDate->toDateString(),
+            'patient_id'     => $this->patient->id,
+            'doctor_id'      => $this->doctor->id,
+            'date'           => $this->testDate->toDateString(),
             'preferred_time' => '09:00',
         ];
 
@@ -109,9 +117,9 @@ class AppointmentServiceTest extends TestCase
     {
         // Arrange - Book first
         $appointment = $this->appointmentService->bookAppointment([
-            'patient_id' => $this->patient->id,
-            'doctor_id' => $this->doctor->id,
-            'date' => $this->testDate->toDateString(),
+            'patient_id'     => $this->patient->id,
+            'doctor_id'      => $this->doctor->id,
+            'date'           => $this->testDate->toDateString(),
             'preferred_time' => '09:00',
         ]);
 
@@ -132,9 +140,9 @@ class AppointmentServiceTest extends TestCase
     {
         // Arrange - Book first
         $appointment = $this->appointmentService->bookAppointment([
-            'patient_id' => $this->patient->id,
-            'doctor_id' => $this->doctor->id,
-            'date' => $this->testDate->toDateString(),
+            'patient_id'     => $this->patient->id,
+            'doctor_id'      => $this->doctor->id,
+            'date'           => $this->testDate->toDateString(),
             'preferred_time' => '09:00',
         ]);
 
@@ -142,7 +150,8 @@ class AppointmentServiceTest extends TestCase
         $this->appointmentService->cancelAppointment($appointment->id, 'Test');
 
         // Assert - Slots should be available again with NULL appointment_id
-        $releasedSlots = \App\Models\PostgreSQL\Slot::where('doctor_id', $this->doctor->id)
+        // Assuming slots 5 & 6 correspond to 09:00–09:30 in your slot mapping.
+        $releasedSlots = Slot::where('doctor_id', $this->doctor->id)
             ->where('date', $this->testDate->toDateString())
             ->where('status', 'available')
             ->whereNull('appointment_id')
@@ -157,9 +166,9 @@ class AppointmentServiceTest extends TestCase
     {
         // Arrange - Book first
         $appointment = $this->appointmentService->bookAppointment([
-            'patient_id' => $this->patient->id,
-            'doctor_id' => $this->doctor->id,
-            'date' => $this->testDate->toDateString(),
+            'patient_id'     => $this->patient->id,
+            'doctor_id'      => $this->doctor->id,
+            'date'           => $this->testDate->toDateString(),
             'preferred_time' => '09:00',
         ]);
 
@@ -177,9 +186,9 @@ class AppointmentServiceTest extends TestCase
     {
         // Arrange - Book first
         $original = $this->appointmentService->bookAppointment([
-            'patient_id' => $this->patient->id,
-            'doctor_id' => $this->doctor->id,
-            'date' => $this->testDate->toDateString(),
+            'patient_id'     => $this->patient->id,
+            'doctor_id'      => $this->doctor->id,
+            'date'           => $this->testDate->toDateString(),
             'preferred_time' => '09:00',
         ]);
 
@@ -201,9 +210,9 @@ class AppointmentServiceTest extends TestCase
     {
         // Arrange - Book at 09:00
         $original = $this->appointmentService->bookAppointment([
-            'patient_id' => $this->patient->id,
-            'doctor_id' => $this->doctor->id,
-            'date' => $this->testDate->toDateString(),
+            'patient_id'     => $this->patient->id,
+            'doctor_id'      => $this->doctor->id,
+            'date'           => $this->testDate->toDateString(),
             'preferred_time' => '09:00',
         ]);
 
@@ -215,7 +224,7 @@ class AppointmentServiceTest extends TestCase
         );
 
         // Assert - Old slots (09:00) should be available
-        $releasedSlots = \App\Models\PostgreSQL\Slot::where('doctor_id', $this->doctor->id)
+        $releasedSlots = Slot::where('doctor_id', $this->doctor->id)
             ->where('date', $this->testDate->toDateString())
             ->where('status', 'available')
             ->whereNull('appointment_id')
@@ -228,21 +237,21 @@ class AppointmentServiceTest extends TestCase
     #[Test]
     public function it_throws_exception_when_no_consecutive_slots_available()
     {
-        // Arrange - Book all slots except one
+        // Arrange - Book all slots except one so that no 2 consecutive slots remain
         for ($i = 1; $i <= 23; $i++) {
-            \App\Models\PostgreSQL\Slot::where('doctor_id', $this->doctor->id)
+            Slot::where('doctor_id', $this->doctor->id)
                 ->where('date', $this->testDate->toDateString())
                 ->where('slot_number', $i)
                 ->update(['status' => 'booked']);
         }
 
-        // Act & Assert
+        // Act & Assert - Booking should now fail due to no consecutive slots
         $this->expectException(SlotException::class);
 
         $this->appointmentService->bookAppointment([
-            'patient_id' => $this->patient->id,
-            'doctor_id' => $this->doctor->id,
-            'date' => $this->testDate->toDateString(),
+            'patient_id'     => $this->patient->id,
+            'doctor_id'      => $this->doctor->id,
+            'date'           => $this->testDate->toDateString(),
             'preferred_time' => '09:00',
         ]);
     }
@@ -250,11 +259,11 @@ class AppointmentServiceTest extends TestCase
     #[Test]
     public function it_can_get_upcoming_appointments_for_patient()
     {
-        // Arrange - Book 2 appointments
+        // Arrange - Book 1st appointment on testDate
         $this->appointmentService->bookAppointment([
-            'patient_id' => $this->patient->id,
-            'doctor_id' => $this->doctor->id,
-            'date' => $this->testDate->toDateString(),
+            'patient_id'     => $this->patient->id,
+            'doctor_id'      => $this->doctor->id,
+            'date'           => $this->testDate->toDateString(),
             'preferred_time' => '09:00',
         ]);
 
@@ -264,20 +273,22 @@ class AppointmentServiceTest extends TestCase
             $nextDate = $nextDate->next(Carbon::MONDAY);
         }
 
-        // Update schedule and generate slots for the next day
+        // Ensure schedule & slots for the next day
         DoctorSchedule::where('doctor_id', $this->doctor->id)
             ->where('day_of_week', $nextDate->dayOfWeek)
             ->update([
-                'start_time' => '08:00:00',
-                'end_time' => '14:00:00',
+                'start_time'   => '08:00:00',
+                'end_time'     => '14:00:00',
                 'is_available' => true,
             ]);
+
         $this->slotService->generateSlotsForDate($this->doctor->id, $nextDate);
 
+        // Book 2nd appointment on the next day
         $this->appointmentService->bookAppointment([
-            'patient_id' => $this->patient->id,
-            'doctor_id' => $this->doctor->id,
-            'date' => $nextDate->toDateString(),
+            'patient_id'     => $this->patient->id,
+            'doctor_id'      => $this->doctor->id,
+            'date'           => $nextDate->toDateString(),
             'preferred_time' => '10:00',
         ]);
 

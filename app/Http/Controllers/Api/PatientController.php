@@ -16,6 +16,56 @@ class PatientController extends Controller
     public function __construct(private PatientService $patientService) {}
 
     /**
+     * @OA\Post(
+     *     path="/api/v1/patients/lookup",
+     *     summary="Lookup patient by phone or name",
+     *     description="Search for existing patient records by phone number and/or name",
+     *     tags={"Patients"},
+     *     security={{"ApiKeyAuth": {}}},
+     *     @OA\RequestBody(
+     *         required=true,
+     *         @OA\JsonContent(
+     *             required={"phone"},
+     *             @OA\Property(property="phone", type="string", example="+1987654321", description="Patient phone number"),
+     *             @OA\Property(property="name", type="string", example="Jane Doe", description="Patient full name (optional, for verification)")
+     *         )
+     *     ),
+     *     @OA\Response(
+     *         response=200,
+     *         description="Lookup completed (patient may or may not be found)",
+     *         @OA\JsonContent(
+     *             @OA\Property(property="success", type="boolean", example=true),
+     *             @OA\Property(property="found", type="boolean", example=true, description="True if patient found, false otherwise"),
+     *             @OA\Property(
+     *                 property="data",
+     *                 oneOf={
+     *                     @OA\Schema(
+     *                         type="object",
+     *                         @OA\Property(property="id", type="integer", example=7),
+     *                         @OA\Property(property="mrn", type="string", example="MRN000007"),
+     *                         @OA\Property(property="first_name", type="string", example="Jane"),
+     *                         @OA\Property(property="last_name", type="string", example="Doe"),
+     *                         @OA\Property(property="phone", type="string", example="+1987654321"),
+     *                         @OA\Property(property="date_of_birth", type="string", format="date", example="1990-05-15")
+     *                     ),
+     *                     @OA\Schema(type="null")
+     *                 },
+     *                 description="Patient data if found, null otherwise"
+     *             )
+     *         )
+     *     ),
+     *     @OA\Response(
+     *         response=400,
+     *         description="Bad request",
+     *         @OA\JsonContent(ref="#/components/schemas/ErrorResponse")
+     *     ),
+     *     @OA\Response(
+     *         response=422,
+     *         description="Validation error",
+     *         @OA\JsonContent(ref="#/components/schemas/ErrorResponse")
+     *     )
+     * )
+     *
      * POST /api/v1/patients/lookup
      * Lookup patient by phone and/or name
      */

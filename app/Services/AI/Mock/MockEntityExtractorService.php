@@ -35,7 +35,7 @@ class MockEntityExtractorService implements EntityExtractorServiceInterface
     public function extract(string $text, array $context = []): EntityDTO
     {
         if ($this->verbose) {
-            \Log::info('[MockEntityExtractor] Extracting', [
+            Log::info('[MockEntityExtractor] Extracting', [
                 'text' => $text,
                 'context' => $context,
             ]);
@@ -52,7 +52,7 @@ class MockEntityExtractorService implements EntityExtractorServiceInterface
         ];
 
         if ($this->verbose) {
-            \Log::info('[MockEntityExtractor] Extracted', [
+            Log::info('[MockEntityExtractor] Extracted', [
                 'entities' => array_filter($entities),
             ]);
         }
@@ -203,7 +203,7 @@ class MockEntityExtractorService implements EntityExtractorServiceInterface
         }
 
         // Format: January 15 or Jan 15
-        if (preg_match('/\b(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})\b/i', $text, $matches)) {
+        if (preg_match('/\b(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})\b/i', $text, $matches)) {
             $month = date('m', strtotime($matches[1]));
             $day = $matches[2];
             $year = $today->year;

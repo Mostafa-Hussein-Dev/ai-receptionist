@@ -23,21 +23,19 @@ class SlotApiTest extends TestCase
     public function it_can_get_available_slots()
     {
         $department = Department::factory()->create();
-        $doctor = Doctor::factory()->create(['department_id' => $department->id]);
 
-        $tomorrow = Carbon::tomorrow();
-        $dayOfWeek = $tomorrow->dayOfWeek;
-
-        DoctorSchedule::factory()->create([
-            'doctor_id' => $doctor->id,
-            'day_of_week' => $dayOfWeek,
-            'is_available' => true,
+        // Prevent default Mon–Fri schedules
+        $doctor = Doctor::factory()->withoutSchedule()->create([
+            'department_id' => $department->id,
         ]);
 
-        // Generate slots
-        app(SlotService::class)->generateSlotsForDate($doctor->id, $tomorrow);
+        // Always use a known working weekday
+        $date = Carbon::now()->next(Carbon::MONDAY);
 
-        $response = $this->getJson("/api/v1/slots?doctor_id={$doctor->id}&date={$tomorrow->format('Y-m-d')}");
+        // Let SlotService auto-create schedule + slots
+        app(SlotService::class)->generateSlotsForDate($doctor->id, $date);
+
+        $response = $this->getJson("/api/v1/slots?doctor_id={$doctor->id}&date={$date->format('Y-m-d')}");
 
         $response->assertStatus(200)
             ->assertJsonStructure([

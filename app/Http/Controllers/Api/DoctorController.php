@@ -16,6 +16,31 @@ class DoctorController extends Controller
     public function __construct(private DoctorService $doctorService) {}
 
     /**
+     * @OA\Get(
+     *     path="/api/v1/doctors",
+     *     summary="Get all active doctors",
+     *     description="Retrieve a list of all active doctors in the system",
+     *     tags={"Doctors"},
+     *     @OA\Response(
+     *         response=200,
+     *         description="Successful operation",
+     *         @OA\JsonContent(
+     *             @OA\Property(property="success", type="boolean", example=true),
+     *             @OA\Property(
+     *                 property="data",
+     *                 type="array",
+     *                 @OA\Items(
+     *                     @OA\Property(property="id", type="integer", example=3),
+     *                     @OA\Property(property="name", type="string", example="John Smith"),
+     *                     @OA\Property(property="specialization", type="string", example="General Practitioner"),
+     *                     @OA\Property(property="department", type="string", example="General Medicine"),
+     *                     @OA\Property(property="slots_per_appointment", type="integer", example=2)
+     *                 )
+     *             )
+     *         )
+     *     )
+     * )
+     *
      * GET /api/v1/doctors
      * Get all active doctors
      */
@@ -36,6 +61,46 @@ class DoctorController extends Controller
     }
 
     /**
+     * @OA\Get(
+     *     path="/api/v1/doctors/{id}",
+     *     summary="Get doctor details",
+     *     description="Retrieve detailed information about a specific doctor",
+     *     tags={"Doctors"},
+     *     @OA\Parameter(
+     *         name="id",
+     *         in="path",
+     *         description="Doctor ID",
+     *         required=true,
+     *         @OA\Schema(type="integer", example=3)
+     *     ),
+     *     @OA\Response(
+     *         response=200,
+     *         description="Successful operation",
+     *         @OA\JsonContent(
+     *             @OA\Property(property="success", type="boolean", example=true),
+     *             @OA\Property(
+     *                 property="data",
+     *                 type="object",
+     *                 @OA\Property(property="id", type="integer", example=3),
+     *                 @OA\Property(property="first_name", type="string", example="John"),
+     *                 @OA\Property(property="last_name", type="string", example="Smith"),
+     *                 @OA\Property(property="email", type="string", example="dr.smith@hospital.com"),
+     *                 @OA\Property(property="phone", type="string", example="+1234567890"),
+     *                 @OA\Property(property="specialization", type="string", example="General Practitioner"),
+     *                 @OA\Property(property="department", type="string", example="General Medicine"),
+     *                 @OA\Property(property="slots_per_appointment", type="integer", example=2),
+     *                 @OA\Property(property="max_appointments_per_day", type="integer", example=12),
+     *                 @OA\Property(property="is_active", type="boolean", example=true)
+     *             )
+     *         )
+     *     ),
+     *     @OA\Response(
+     *         response=404,
+     *         description="Doctor not found",
+     *         @OA\JsonContent(ref="#/components/schemas/ErrorResponse")
+     *     )
+     * )
+     *
      * GET /api/v1/doctors/{id}
      * Get doctor details
      */
@@ -68,6 +133,49 @@ class DoctorController extends Controller
     }
 
     /**
+     * @OA\Get(
+     *     path="/api/v1/doctors/{id}/availability",
+     *     summary="Check doctor availability",
+     *     description="Check if a doctor is available on a specific date",
+     *     tags={"Doctors"},
+     *     @OA\Parameter(
+     *         name="id",
+     *         in="path",
+     *         description="Doctor ID",
+     *         required=true,
+     *         @OA\Schema(type="integer", example=3)
+     *     ),
+     *     @OA\Parameter(
+     *         name="date",
+     *         in="query",
+     *         description="Date to check availability (YYYY-MM-DD)",
+     *         required=true,
+     *         @OA\Schema(type="string", format="date", example="2025-12-09")
+     *     ),
+     *     @OA\Response(
+     *         response=200,
+     *         description="Availability checked successfully",
+     *         @OA\JsonContent(
+     *             oneOf={
+     *                 @OA\Schema(
+     *                     @OA\Property(property="success", type="boolean", example=true),
+     *                     @OA\Property(property="available", type="boolean", example=true)
+     *                 ),
+     *                 @OA\Schema(
+     *                     @OA\Property(property="success", type="boolean", example=true),
+     *                     @OA\Property(property="available", type="boolean", example=false),
+     *                     @OA\Property(property="message", type="string", example="Doctor is not available on this date")
+     *                 )
+     *             }
+     *         )
+     *     ),
+     *     @OA\Response(
+     *         response=422,
+     *         description="Validation error",
+     *         @OA\JsonContent(ref="#/components/schemas/ErrorResponse")
+     *     )
+     * )
+     *
      * GET /api/v1/doctors/{id}/availability
      * Check doctor availability for a date
      */

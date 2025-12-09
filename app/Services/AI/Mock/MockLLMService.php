@@ -43,7 +43,7 @@ class MockLLMService implements LLMServiceInterface
         $userContent = $lastMessage['content'] ?? '';
 
         if ($this->verbose) {
-            \Log::info('[MockLLM] Chat request', [
+            Log::info('[MockLLM] Chat request', [
                 'message_count' => count($messages),
                 'last_message' => $userContent,
             ]);
@@ -60,7 +60,7 @@ class MockLLMService implements LLMServiceInterface
         $this->simulateDelay();
 
         if ($this->verbose) {
-            \Log::info('[MockLLM] Complete request', [
+            Log::info('[MockLLM] Complete request', [
                 'prompt_length' => strlen($prompt),
             ]);
         }
@@ -89,7 +89,7 @@ class MockLLMService implements LLMServiceInterface
      */
     public function getModel(): string
     {
-        return 'mock-llm-v1';
+        return 'mock-llm';
     }
 
     /**
@@ -165,7 +165,7 @@ class MockLLMService implements LLMServiceInterface
         }
 
         // Default response
-        return "I understand. Could you please provide more details?";
+        return "I didn't understand. Could you please provide more details?";
     }
 
     /**
