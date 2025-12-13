@@ -106,7 +106,7 @@ class MockEntityExtractorServiceTest extends TestCase
 
         $this->assertArrayHasKey('patient_name', $result->toArray());
         $this->assertArrayHasKey('phone', $result->toArray());
-        $this->assertArrayNotHasKey('date', $result->toArray());
+        $this->assertFalse($result->has('date'));
     }
 
     #[Test]

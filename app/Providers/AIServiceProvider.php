@@ -124,7 +124,7 @@ class AIServiceProvider extends ServiceProvider
         // Log which AI provider is being used
         $provider = config('ai.provider', 'mock');
 
-        Log::info('[AIServiceProvider] AI services registered', [
+        \Log::info('[AIServiceProvider] AI services registered', [
             'provider' => $provider,
             'llm_enabled' => config('ai.response.use_llm', true),
         ]);

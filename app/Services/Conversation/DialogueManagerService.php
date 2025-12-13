@@ -11,6 +11,9 @@ use App\DTOs\SessionDTO;
 use App\Enums\ConversationState;
 use App\Enums\IntentType;
 use Illuminate\Support\Facades\Log;
+use App\Services\Business\DoctorService;
+use App\Services\Business\AppointmentService;
+
 
 /**
  * Dialogue Manager Service
@@ -24,8 +27,11 @@ class DialogueManagerService implements DialogueManagerServiceInterface
     private bool $useLLM;
     private string $hospitalName;
 
-    public function __construct(?LLMServiceInterface $llm = null)
-    {
+    public function __construct(
+        private DoctorService $doctorService,
+        private AppointmentService $appointmentService,
+        ?LLMServiceInterface $llm = null,
+    ) {
         $this->llm = $llm;
         $this->useLLM = config('ai.response.use_llm', true) && $llm !== null;
         $this->hospitalName = config('hospital.name', 'Our Hospital');
@@ -299,11 +305,27 @@ class DialogueManagerService implements DialogueManagerServiceInterface
             ConversationState::SELECT_SLOT => "What time works best for you?",
             ConversationState::CONFIRM_BOOKING => "Great! Let me confirm your appointment. Is this correct?",
             ConversationState::EXECUTE_BOOKING => "Perfect! Your appointment has been booked.",
-            ConversationState::CLOSING => $this->getClosing(),
+            ConversationState::CLOSING => $this->buildClosingSummary($context),
             ConversationState::END => "Thank you for calling. Have a great day!",
             default => "How may I help you?",
         };
     }
+
+    private function buildClosingSummary(array $context): string
+    {
+        $data = $context['collected_data'] ?? [];
+
+        $doctor   = $data['doctor_name'] ?? 'the doctor';
+        $date     = $data['date'] ?? null;
+        $time     = $data['selected_time'] ?? null;
+
+        if ($date && $time) {
+            return "✅ Your appointment with {$doctor} is booked for {$date} at {$time}. Is there anything else I can help you with?";
+        }
+
+        return "Your appointment has been booked successfully. Is there anything else I can help you with?";
+    }
+
 
     /**
      * Build system prompt for LLM

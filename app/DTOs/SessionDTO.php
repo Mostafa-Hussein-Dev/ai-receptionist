@@ -22,7 +22,16 @@ class SessionDTO
         public readonly ?\DateTime $startedAt = null,
         public readonly ?\DateTime $lastActivityAt = null,
         public readonly int $turnCount = 0,
-        public readonly ?array $metadata = null
+        public readonly ?array $metadata = null,
+        public readonly ?int $doctorId = null,
+        public readonly ?string $department = null,
+        public readonly ?string $selectedDate = null,
+        public readonly ?string $selectedTime = null,
+        public readonly ?int $slotNumber = null,
+        public readonly ?int $slotCount = null,
+        public readonly ?int $appointmentId = null,
+        public readonly ?array $availableSlots = null,
+
     ) {}
 
     /**
@@ -46,7 +55,15 @@ class SessionDTO
                 ? new \DateTime($data['last_activity_at'])
                 : null,
             turnCount: $data['turn_count'] ?? 0,
-            metadata: $data['metadata'] ?? null
+            metadata: $data['metadata'] ?? null,
+            doctorId: $data['doctor_id'] ?? null,
+            department: $data['department'] ?? null,
+            selectedDate: $data['selected_date'] ?? null,
+            selectedTime: $data['selected_time'] ?? null,
+            slotNumber: $data['slot_number'] ?? null,
+            slotCount: $data['slot_count'] ?? null,
+            appointmentId: $data['appointment_id'] ?? null,
+            availableSlots: $data['available_slots'] ?? null,
         );
     }
 
@@ -68,6 +85,14 @@ class SessionDTO
             'last_activity_at' => $this->lastActivityAt?->format('Y-m-d H:i:s'),
             'turn_count' => $this->turnCount,
             'metadata' => $this->metadata,
+            'doctor_id' => $this->doctorId,
+            'department' => $this->department,
+            'selected_date' => $this->selectedDate,
+            'selected_time' => $this->selectedTime,
+            'slot_number' => $this->slotNumber,
+            'slot_count' => $this->slotCount,
+            'appointment_id' => $this->appointmentId,
+            'available_slots' => $this->availableSlots,
         ];
     }
 

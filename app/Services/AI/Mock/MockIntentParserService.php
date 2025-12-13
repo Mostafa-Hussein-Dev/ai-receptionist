@@ -122,26 +122,51 @@ class MockIntentParserService implements IntentParserServiceInterface
      */
     private function detectIntent(string $input, array $context): IntentDTO
     {
-        // GREETING
-        if ($this->matchesKeywords($input, ['hello', 'hi', 'hey', 'good morning', 'good afternoon', 'good evening'])) {
+        // ** PRIORITY ORDER MATTERS **
+        // Most specific → least specific
+
+        // 1. CANCEL APPOINTMENT
+        if ($this->matchesAny($input, [
+            'cancel', 'cancel my', 'cancel the', 'delete my appointment',
+            'remove my appointment', 'don\'t need the appointment'
+        ])) {
             return new IntentDTO(
-                intent: IntentType::GREETING->value,
-                confidence: 0.95,
-                reasoning: 'Greeting keywords detected'
+                intent: IntentType::CANCEL_APPOINTMENT->value,
+                confidence: 0.92,
+                reasoning: 'Cancellation keywords detected'
             );
         }
 
-        // GOODBYE
-        if ($this->matchesKeywords($input, ['goodbye', 'bye', 'see you', 'have a good', 'that\'s all', 'nothing else'])) {
+        // 2. RESCHEDULE APPOINTMENT
+        if ($this->matchesAny($input, [
+            'resched', 'change my appointment', 'move my appointment',
+            'different time', 'different day', 'reschedule'
+        ])) {
             return new IntentDTO(
-                intent: IntentType::GOODBYE->value,
-                confidence: 0.95,
-                reasoning: 'Goodbye keywords detected'
+                intent: IntentType::RESCHEDULE_APPOINTMENT->value,
+                confidence: 0.90,
+                reasoning: 'Rescheduling keywords detected'
             );
         }
 
-        // BOOK_APPOINTMENT
-        if ($this->matchesKeywords($input, ['book', 'schedule', 'appointment', 'make an appointment', 'need an appointment', 'want to see'])) {
+        // 3. CHECK APPOINTMENT
+        if ($this->matchesAny($input, [
+            'when is my appointment', 'what time is my appointment',
+            'check my appointment', 'verify my appointment',
+            'confirm my appointment', 'my appointment'
+        ])) {
+            return new IntentDTO(
+                intent: IntentType::CHECK_APPOINTMENT->value,
+                confidence: 0.88,
+                reasoning: 'Check appointment keywords detected'
+            );
+        }
+
+        // 4. BOOK APPOINTMENT
+        if ($this->matchesAny($input, [
+            'book', 'schedule', 'make an appointment',
+            'need an appointment', 'want to see', 'set an appointment'
+        ])) {
             return new IntentDTO(
                 intent: IntentType::BOOK_APPOINTMENT->value,
                 confidence: 0.85,
@@ -149,35 +174,55 @@ class MockIntentParserService implements IntentParserServiceInterface
             );
         }
 
-        // CANCEL_APPOINTMENT
-        if ($this->matchesKeywords($input, ['cancel', 'delete', 'remove', 'don\'t need', 'can\'t make it'])) {
+        // 5. GREETING
+        if ($this->matchesAny($input, [
+            'hello', 'hi', 'hey', 'good morning', 'good afternoon', 'good evening'
+        ])) {
             return new IntentDTO(
-                intent: IntentType::CANCEL_APPOINTMENT->value,
-                confidence: 0.85,
-                reasoning: 'Cancellation keywords detected'
+                intent: IntentType::GREETING->value,
+                confidence: 0.95,
+                reasoning: 'Greeting detected'
             );
         }
 
-        // RESCHEDULE_APPOINTMENT
-        if ($this->matchesKeywords($input, ['reschedule', 'change', 'move', 'different time', 'different day', 'switch'])) {
+        // 6. GOODBYE
+        if ($this->matchesAny($input, [
+            'goodbye', 'bye', 'see you', 'thanks that\'s all',
+            'i\'m done', 'that\'s everything'
+        ])) {
             return new IntentDTO(
-                intent: IntentType::RESCHEDULE_APPOINTMENT->value,
-                confidence: 0.85,
-                reasoning: 'Rescheduling keywords detected'
+                intent: IntentType::GOODBYE->value,
+                confidence: 0.95,
+                reasoning: 'Goodbye detected'
             );
         }
 
-        // CHECK_APPOINTMENT
-        if ($this->matchesKeywords($input, ['check', 'when is', 'what time', 'confirm', 'verify', 'my appointment'])) {
+        // 7. CONFIRM
+        if ($this->matchesAny($input, [
+            'yes', 'yeah', 'yep', 'ok', 'okay', 'correct', 'that’s right'
+        ])) {
             return new IntentDTO(
-                intent: IntentType::CHECK_APPOINTMENT->value,
-                confidence: 0.80,
-                reasoning: 'Checking keywords detected'
+                intent: IntentType::CONFIRM->value,
+                confidence: 0.90,
+                reasoning: 'Confirmation detected'
             );
         }
 
-        // GENERAL_INQUIRY
-        if ($this->matchesKeywords($input, ['hours', 'open', 'close', 'location', 'address', 'phone', 'insurance', 'accept'])) {
+        // 8. DENY
+        if ($this->matchesAny($input, [
+            'no', 'nope', 'not correct', 'that is wrong'
+        ])) {
+            return new IntentDTO(
+                intent: IntentType::DENY->value,
+                confidence: 0.90,
+                reasoning: 'Denial detected'
+            );
+        }
+
+        // 9. GENERAL INQUIRY
+        if ($this->matchesAny($input, [
+            'location', 'hours', 'open', 'close', 'insurance', 'accept'
+        ])) {
             return new IntentDTO(
                 intent: IntentType::GENERAL_INQUIRY->value,
                 confidence: 0.80,
@@ -185,39 +230,20 @@ class MockIntentParserService implements IntentParserServiceInterface
             );
         }
 
-        // CONFIRM
-        if ($this->matchesKeywords($input, ['yes', 'yeah', 'yep', 'correct', 'right', 'that\'s right', 'sounds good', 'ok', 'okay'])) {
-            return new IntentDTO(
-                intent: IntentType::CONFIRM->value,
-                confidence: 0.90,
-                reasoning: 'Confirmation keywords detected'
-            );
-        }
-
-        // DENY
-        if ($this->matchesKeywords($input, ['no', 'nope', 'not', 'wrong', 'incorrect', 'that\'s not'])) {
-            return new IntentDTO(
-                intent: IntentType::DENY->value,
-                confidence: 0.90,
-                reasoning: 'Denial keywords detected'
-            );
-        }
-
-        // PROVIDE_INFO (when user is just giving information)
+        // 10. PROVIDE INFORMATION
         if ($this->looksLikeInformation($input)) {
             return new IntentDTO(
                 intent: IntentType::PROVIDE_INFO->value,
                 confidence: 0.70,
-                reasoning: 'Appears to be providing information'
+                reasoning: 'User providing information'
             );
         }
 
-        // UNKNOWN (default)
+        // 11. UNKNOWN
         return new IntentDTO(
             intent: IntentType::UNKNOWN->value,
             confidence: 0.50,
-            reasoning: 'No clear intent detected',
-            metadata: ['original_input' => $input]
+            reasoning: 'No clear intent detected'
         );
     }
 
@@ -261,4 +287,15 @@ class MockIntentParserService implements IntentParserServiceInterface
 
         return false;
     }
+
+    private function matchesAny(string $input, array $patterns): bool
+    {
+        foreach ($patterns as $pattern) {
+            if (str_contains($input, strtolower($pattern))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
 }

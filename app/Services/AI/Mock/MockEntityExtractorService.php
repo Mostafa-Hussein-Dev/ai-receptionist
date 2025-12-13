@@ -57,7 +57,10 @@ class MockEntityExtractorService implements EntityExtractorServiceInterface
             ]);
         }
 
-        return EntityDTO::fromArray($entities);
+        return EntityDTO::fromArray(array_filter(
+            $entities,
+            fn($value) => $value !== null
+        ));
     }
 
     /**
@@ -68,16 +71,19 @@ class MockEntityExtractorService implements EntityExtractorServiceInterface
         array $entityTypes,
         array $context = []
     ): EntityDTO {
-        $allEntities = $this->extract($text, $context)->toArray();
+        // Extract ALL entities
+        $all = $this->extract($text, $context)->toArray();
 
-        // Filter to only requested entities
-        $filtered = array_filter(
-            $allEntities,
-            fn($key) => in_array($key, $entityTypes),
-            ARRAY_FILTER_USE_KEY
-        );
+        // Now build a fresh array containing ONLY requested ones
+        $result = [];
 
-        return EntityDTO::fromArray($filtered);
+        foreach ($entityTypes as $type) {
+            if (array_key_exists($type, $all) && $all[$type] !== null) {
+                $result[$type] = $all[$type];
+            }
+        }
+
+        return EntityDTO::fromArray($result);
     }
 
     /**
@@ -331,7 +337,7 @@ class MockEntityExtractorService implements EntityExtractorServiceInterface
         foreach ($departments as $dept => $keywords) {
             foreach ($keywords as $keyword) {
                 if (str_contains($text, $keyword)) {
-                    return ucfirst($dept);
+                    return $dept;
                 }
             }
         }
