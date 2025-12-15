@@ -29,11 +29,11 @@ class OpenAILLMService implements LLMServiceInterface
 
     public function __construct()
     {
-        $this->model = config('ai.openai.model', 'gpt-5-nano');
-        $this->maxTokens = config('ai.openai.max_tokens', 1000);
-        $this->temperature = config('ai.openai.temperature', 0.7);
-        $this->timeout = config('ai.openai.timeout', 30);
-        $this->maxRetries = config('ai.openai.max_retries', 2);
+        $this->model = config('openai.model', 'gpt-5-nano');
+        $this->maxTokens = config('openai.max_tokens', 1000);
+        $this->temperature = config('openai.temperature', 0.7);
+        $this->timeout = config('openai.timeout', 30);
+        $this->maxRetries = config('openai.max_retries', 2);
         $this->logRequests = config('ai.error_handling.log_requests', true);
     }
 
@@ -62,8 +62,8 @@ class OpenAILLMService implements LLMServiceInterface
             $response = OpenAI::chat()->create([
                 'model' => $this->model,
                 'messages' => $formattedMessages,
-                'max_tokens' => $this->maxTokens,
-                'temperature' => $this->temperature,
+                'max_completion_tokens' => $this->maxTokens,
+                'temperature' => $this->model === 'gpt-5-nano' ? 1 : $this->temperature,
             ]);
 
             $content = $response->choices[0]->message->content ?? '';
@@ -111,7 +111,7 @@ class OpenAILLMService implements LLMServiceInterface
     public function isAvailable(): bool
     {
         try {
-            $apiKey = config('ai.openai.api_key');
+            $apiKey = config('openai.api_key');
 
             // Check if API key is set and not placeholder
             if (empty($apiKey) || $apiKey === 'sk-YOUR_KEY_HERE') {
@@ -167,8 +167,8 @@ class OpenAILLMService implements LLMServiceInterface
                     ['role' => 'system', 'content' => $systemPrompt],
                     ['role' => 'user', 'content' => $userPrompt],
                 ],
-                'max_tokens' => $this->maxTokens,
-                'temperature' => $this->temperature,
+                'max_completion_tokens' => $this->maxTokens,
+                'temperature' => $this->model === 'gpt-5-nano' ? 1 : $this->temperature,
             ]);
 
             $content = $response->choices[0]->message->content ?? '';

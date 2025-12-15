@@ -26,7 +26,7 @@ class IntentParserService implements IntentParserServiceInterface
     public function __construct(OpenAILLMService $llm)
     {
         $this->llm = $llm;
-        $this->confidenceThreshold = config('ai.intent.confidence_threshold', 0.7);
+        $this->confidenceThreshold = config('ai.intent.confidence_threshold', 1);
         $this->useHistory = config('ai.intent.use_history', true);
         $this->maxHistoryTurns = config('ai.intent.max_history_turns', 5);
     }
@@ -79,19 +79,11 @@ class IntentParserService implements IntentParserServiceInterface
 
             return $result;
 
-        } catch (\Exception $e) {
+    } catch (\Exception $e) {
             Log::error('[OpenAI IntentParser] Parsing failed', [
                 'error' => $e->getMessage(),
                 'message' => $userMessage,
             ]);
-
-            // Fallback to mock parser
-            if (config('ai.error_handling.fallback_to_mock', true)) {
-                Log::warning('[OpenAI IntentParser] Falling back to Mock');
-                $mockParser = app(\App\Services\AI\Mock\MockIntentParserService::class);
-                return $mockParser->parse($userMessage, $context);
-            }
-
             throw new \Exception('Intent parsing failed: ' . $e->getMessage());
         }
     }

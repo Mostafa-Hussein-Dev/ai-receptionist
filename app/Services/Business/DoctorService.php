@@ -5,6 +5,7 @@ namespace App\Services\Business;
 use App\Models\PostgreSQL\Doctor;
 use App\Models\PostgreSQL\DoctorSchedule;
 use App\Models\PostgreSQL\DoctorScheduleException;
+use App\Models\PostgreSQL\Department;
 use Carbon\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
@@ -339,5 +340,47 @@ class DoctorService
         }
 
         return $searchQuery->get();
+    }
+
+    /**
+     * Get doctors by department name
+     */
+    public function getDoctorsByDepartmentName(string $departmentName, bool $activeOnly = true): Collection
+    {
+        $department = Department::where('name', 'ILIKE', "%{$departmentName}%")->first();
+
+        if (!$department) {
+            return collect([]);
+        }
+
+        return $this->getDoctorsByDepartment($department->id, $activeOnly);
+    }
+
+    /**
+     * Get all available departments
+     */
+    public function getAvailableDepartments(): Collection
+    {
+        return Department::whereHas('doctors', function ($query) {
+            $query->where('is_active', true);
+        })->get();
+    }
+
+    /**
+     * Get department ID by name
+     */
+    public function getDepartmentIdByName(string $departmentName): ?int
+    {
+        $department = Department::where('name', 'ILIKE', "%{$departmentName}%")->first();
+        return $department ? $department->id : null;
+    }
+
+    /**
+     * Get department name by ID
+     */
+    public function getDepartmentNameById(int $departmentId): ?string
+    {
+        $department = Department::find($departmentId);
+        return $department ? $department->name : null;
     }
 }

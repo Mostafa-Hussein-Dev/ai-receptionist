@@ -6,6 +6,7 @@
 
 namespace App\Providers;
 
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\ServiceProvider;
 
 // Interfaces
@@ -17,18 +18,11 @@ use App\Contracts\{
     DialogueManagerServiceInterface
 };
 
-// Mock Implementations
-use App\Services\AI\{
-    Mock\MockLLMService,
-    Mock\MockIntentParserService,
-    Mock\MockEntityExtractorService
-};
-
 // Real Implementations
-use App\Services\AI\{
-    OpenAI\OpenAILLMService,
-    OpenAI\IntentParserService,
-    OpenAI\EntityExtractorService
+use App\Services\AI\OpenAI\{
+    OpenAILLMService,
+    IntentParserService,
+    EntityExtractorService
 };
 
 // Conversation Services
@@ -38,7 +32,7 @@ use App\Services\Conversation\{
 };
 
 /**
- * AI Service Provider
+ * AI Service Provider - OpenAI
  *
  * Binds all AI-related service interfaces to their implementations.
  * Determines whether to use Mock or Real services based on configuration.
@@ -54,43 +48,25 @@ class AIServiceProvider extends ServiceProvider
         // LLM SERVICE BINDING
         // ==================================================================
         $this->app->bind(LLMServiceInterface::class, function ($app) {
-            $provider = config('ai.provider', 'mock');
-
-            return match ($provider) {
-                'openai' => new OpenAILLMService(),
-                'mock' => new MockLLMService(),
-                default => new MockLLMService(),
-            };
+            return new OpenAILLMService();
         });
 
         // ==================================================================
         // INTENT PARSER BINDING
         // ==================================================================
         $this->app->bind(IntentParserServiceInterface::class, function ($app) {
-            $provider = config('ai.provider', 'mock');
-
-            return match ($provider) {
-                'openai' => new IntentParserService(
-                    $app->make(LLMServiceInterface::class)
-                ),
-                'mock' => new MockIntentParserService(),
-                default => new MockIntentParserService(),
-            };
+            return new IntentParserService(
+                $app->make(LLMServiceInterface::class)
+            );
         });
 
         // ==================================================================
         // ENTITY EXTRACTOR BINDING
         // ==================================================================
         $this->app->bind(EntityExtractorServiceInterface::class, function ($app) {
-            $provider = config('ai.provider', 'mock');
-
-            return match ($provider) {
-                'openai' => new EntityExtractorService(
-                    $app->make(LLMServiceInterface::class)
-                ),
-                'mock' => new MockEntityExtractorService(),
-                default => new MockEntityExtractorService(),
-            };
+            return new EntityExtractorService(
+                $app->make(LLMServiceInterface::class)
+            );
         });
 
         // ==================================================================
@@ -102,11 +78,11 @@ class AIServiceProvider extends ServiceProvider
         // DIALOGUE MANAGER BINDING
         // ==================================================================
         $this->app->singleton(DialogueManagerServiceInterface::class, function ($app) {
-            $llm = config('ai.response.use_llm', true) && config('ai.provider') !== 'mock'
-                ? $app->make(LLMServiceInterface::class)
-                : null;
-
-            return new DialogueManagerService($llm);
+            return new DialogueManagerService(
+                $app->make(\App\Services\Business\DoctorService::class),
+                $app->make(\App\Services\Business\AppointmentService::class),
+                $app->make(LLMServiceInterface::class)
+            );
         });
 
         // ==================================================================
@@ -121,38 +97,7 @@ class AIServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
-        // Log which AI provider is being used
-        $provider = config('ai.provider', 'mock');
-
-        \Log::info('[AIServiceProvider] AI services registered', [
-            'provider' => $provider,
-            'llm_enabled' => config('ai.response.use_llm', true),
-        ]);
+        Log::info('[AIServiceProvider] Real OpenAI services registered');
     }
 }
-
-// ============================================================================
-// USAGE EXAMPLES
-// ============================================================================
-//
-// 1. Inject interface in constructor (automatic resolution):
-//
-//    public function __construct(IntentParserServiceInterface $intentParser)
-//    {
-//        $this->intentParser = $intentParser;
-//    }
-//
-// 2. Resolve from container:
-//
-//    $intentParser = app(IntentParserServiceInterface::class);
-//    $intent = $intentParser->parse("I need an appointment", []);
-//
-// 3. Use in tests (swap implementation):
-//
-//    $this->app->bind(
-//        IntentParserServiceInterface::class,
-//        MockIntentParserService::class
-//    );
-//
-// ============================================================================
 

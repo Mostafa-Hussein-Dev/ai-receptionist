@@ -56,13 +56,6 @@ class EntityExtractorService implements EntityExtractorServiceInterface
                 'text' => $text,
             ]);
 
-            // Fallback to mock extractor
-            if (config('ai.error_handling.fallback_to_mock', true)) {
-                Log::warning('[OpenAI EntityExtractor] Falling back to Mock');
-                $mockExtractor = app(\App\Services\AI\Mock\MockEntityExtractorService::class);
-                return $mockExtractor->extract($text, $context);
-            }
-
             throw new \Exception('Entity extraction failed: ' . $e->getMessage());
         }
     }

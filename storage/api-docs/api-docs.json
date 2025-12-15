@@ -2,23 +2,8 @@
     "openapi": "3.0.0",
     "info": {
         "title": "AI Receptionist API",
-        "description": "AI-powered voice receptionist system for hospital appointment management. This API handles doctor schedules, patient information, appointment booking, and slot management. Some endpoints require API key authentication via the X-API-Key header (appointments and patient lookup).",
-        "contact": {
-            "name": "API Support",
-            "email": "support@hospital.com"
-        },
         "version": "1.0.0"
     },
-    "servers": [
-        {
-            "url": "http://127.0.0.1:8000",
-            "description": "Local Development Server"
-        },
-        {
-            "url": "http://localhost:8000",
-            "description": "Alternative Local Server"
-        }
-    ],
     "paths": {
         "/api/v1/appointments": {
             "post": {

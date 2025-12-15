@@ -55,35 +55,70 @@ class DialogueManagerService implements DialogueManagerServiceInterface
                 return ConversationState::DETECT_INTENT->value;
 
             case ConversationState::DETECT_INTENT:
+                // Handle PROVIDE_INFO intent by checking what data we've collected
+                if ($intent->intent === 'PROVIDE_INFO') {
+                    $collectedData = $context['collected_data'] ?? [];
+
+                    // No data yet - start booking flow
+                    if (empty($collectedData)) {
+                        return ConversationState::BOOK_APPOINTMENT->value;
+                    }
+
+                    // Check what's missing and go to appropriate collection state
+                    if (!isset($collectedData['patient_name'])) {
+                        return ConversationState::COLLECT_PATIENT_NAME->value;
+                    }
+                    if (!isset($collectedData['date_of_birth'])) {
+                        return ConversationState::COLLECT_PATIENT_DOB->value;
+                    }
+                    if (!isset($collectedData['phone'])) {
+                        return ConversationState::COLLECT_PATIENT_PHONE->value;
+                    }
+
+                    // All basic info collected - move to verification
+                    return ConversationState::VERIFY_PATIENT->value;
+                }
+
+                // For other intents, use the routing logic
                 return $this->routeFromIntent($intent);
 
             case ConversationState::BOOK_APPOINTMENT:
                 return ConversationState::COLLECT_PATIENT_NAME->value;
 
             case ConversationState::COLLECT_PATIENT_NAME:
-                if ($entities->has('patient_name')) {
+                $collectedData = $context['collected_data'] ?? [];
+                if ($entities->has('patient_name') || isset($collectedData['patient_name'])) {
                     return ConversationState::COLLECT_PATIENT_DOB->value;
                 }
                 return ConversationState::COLLECT_PATIENT_NAME->value;
 
             case ConversationState::COLLECT_PATIENT_DOB:
-                if ($entities->has('date_of_birth')) {
+                $collectedData = $context['collected_data'] ?? [];
+                if ($entities->has('date_of_birth') || isset($collectedData['date_of_birth'])) {
                     return ConversationState::COLLECT_PATIENT_PHONE->value;
                 }
                 return ConversationState::COLLECT_PATIENT_DOB->value;
 
             case ConversationState::COLLECT_PATIENT_PHONE:
-                if ($entities->has('phone')) {
+                $collectedData = $context['collected_data'] ?? [];
+                if ($entities->has('phone') || isset($collectedData['phone'])) {
                     return ConversationState::VERIFY_PATIENT->value;
                 }
                 return ConversationState::COLLECT_PATIENT_PHONE->value;
 
             case ConversationState::VERIFY_PATIENT:
-                // After verification, move to doctor selection or date
-                return ConversationState::SELECT_DATE->value;
+                return ConversationState::SELECT_DOCTOR->value;
+
+            case ConversationState::SELECT_DOCTOR:
+                $collectedData = $context['collected_data'] ?? [];
+                if ($entities->has('doctor_name') || isset($collectedData['doctor_name'])) {
+                    return ConversationState::SELECT_DATE->value;
+                }
+                return ConversationState::SELECT_DOCTOR->value;
 
             case ConversationState::SELECT_DATE:
-                if ($entities->has('date')) {
+                $collectedData = $context['collected_data'] ?? [];
+                if ($entities->has('date') || isset($collectedData['date'])) {
                     return ConversationState::SHOW_AVAILABLE_SLOTS->value;
                 }
                 return ConversationState::SELECT_DATE->value;
@@ -92,7 +127,8 @@ class DialogueManagerService implements DialogueManagerServiceInterface
                 return ConversationState::SELECT_SLOT->value;
 
             case ConversationState::SELECT_SLOT:
-                if ($entities->has('time')) {
+                $collectedData = $context['collected_data'] ?? [];
+                if ($entities->has('time') || isset($collectedData['time'])) {
                     return ConversationState::CONFIRM_BOOKING->value;
                 }
                 return ConversationState::SELECT_SLOT->value;
@@ -126,6 +162,7 @@ class DialogueManagerService implements DialogueManagerServiceInterface
             ConversationState::COLLECT_PATIENT_NAME => ['patient_name'],
             ConversationState::COLLECT_PATIENT_DOB => ['date_of_birth'],
             ConversationState::COLLECT_PATIENT_PHONE => ['phone'],
+            ConversationState::SELECT_DOCTOR => ['doctor_name'],
             ConversationState::SELECT_DATE => ['date'],
             ConversationState::SELECT_SLOT => ['time'],
             default => [],
@@ -300,6 +337,7 @@ class DialogueManagerService implements DialogueManagerServiceInterface
             ConversationState::COLLECT_PATIENT_NAME => "May I have your full name please?",
             ConversationState::COLLECT_PATIENT_DOB => "What's your date of birth?",
             ConversationState::COLLECT_PATIENT_PHONE => "What's the best phone number to reach you?",
+            ConversationState::SELECT_DOCTOR => "Which doctor would you like to see, or do you have a preference for a department?",
             ConversationState::SELECT_DATE => "What date would you like for your appointment?",
             ConversationState::SHOW_AVAILABLE_SLOTS => "Let me check available times for you.",
             ConversationState::SELECT_SLOT => "What time works best for you?",
