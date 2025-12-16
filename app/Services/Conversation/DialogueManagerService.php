@@ -13,6 +13,9 @@ use App\Enums\IntentType;
 use Illuminate\Support\Facades\Log;
 use App\Services\Business\DoctorService;
 use App\Services\Business\AppointmentService;
+use App\Services\Business\SlotService;
+use App\Services\Conversation\SessionManagerServiceInterface;
+use Carbon\Carbon;
 
 
 /**
@@ -29,6 +32,7 @@ class DialogueManagerService implements DialogueManagerServiceInterface
 
     public function __construct(
         private DoctorService $doctorService,
+        private SlotService $slotService,
         private AppointmentService $appointmentService,
         ?LLMServiceInterface $llm = null,
     ) {
@@ -111,19 +115,61 @@ class DialogueManagerService implements DialogueManagerServiceInterface
 
             case ConversationState::SELECT_DOCTOR:
                 $collectedData = $context['collected_data'] ?? [];
-                // Only proceed to SELECT_DATE if we have a validated doctor_id (set by ConversationOrchestrator)
                 $doctorId = $collectedData['doctor_id'] ?? null;
+                $doctorName = $collectedData['doctor_name'] ?? null;
+
                 Log::info('[DialogueManager] SELECT_DOCTOR state check', [
                     'doctor_id' => $doctorId,
-                    'doctor_name' => $collectedData['doctor_name'] ?? null,
+                    'doctor_name' => $doctorName,
                     'collected_data_keys' => array_keys($collectedData)
                 ]);
 
+                // If we have doctor_id, proceed
                 if (isset($collectedData['doctor_id']) && !empty($collectedData['doctor_id'])) {
-                    Log::info('[DialogueManager] Proceeding to SELECT_DATE - doctor_id found', ['doctor_id' => $collectedData['doctor_id']]);
+                    Log::info('[DialogueManager] Proceeding to SELECT_DATE - valid doctor_id', [
+                        'doctor_id' => $collectedData['doctor_id']
+                    ]);
                     return ConversationState::SELECT_DATE->value;
                 }
-                Log::info('[DialogueManager] Staying in SELECT_DOCTOR - no doctor_id found');
+
+                // If we have doctor_name, validate it exists in database
+                if (isset($collectedData['doctor_name']) && !empty($collectedData['doctor_name'])) {
+                    try {
+                        $doctors = $this->doctorService->searchDoctors($collectedData['doctor_name']);
+
+                        if ($doctors->count() === 1) {
+                            // Exact match - proceed
+                            $doctor = $doctors->first();
+                            Log::info('[DialogueManager] Proceeding to SELECT_DATE - doctor validated', [
+                                'doctor_name' => $collectedData['doctor_name'],
+                                'doctor_id' => $doctor->id,
+                                'validated_doctor' => "Dr. {$doctor->first_name} {$doctor->last_name}"
+                            ]);
+                            return ConversationState::SELECT_DATE->value;
+                        } elseif ($doctors->count() > 1) {
+                            // Multiple matches - stay in SELECT_DOCTOR to disambiguate
+                            Log::info('[DialogueManager] Multiple doctor matches found - staying in SELECT_DOCTOR', [
+                                'doctor_name' => $collectedData['doctor_name'],
+                                'match_count' => $doctors->count()
+                            ]);
+                            return ConversationState::SELECT_DOCTOR->value;
+                        } else {
+                            // No matches - stay in SELECT_DOCTOR
+                            Log::info('[DialogueManager] No doctor found - staying in SELECT_DOCTOR', [
+                                'doctor_name' => $collectedData['doctor_name']
+                            ]);
+                            return ConversationState::SELECT_DOCTOR->value;
+                        }
+                    } catch (\Exception $e) {
+                        Log::error('[DialogueManager] Doctor validation failed', [
+                            'doctor_name' => $collectedData['doctor_name'],
+                            'error' => $e->getMessage()
+                        ]);
+                        return ConversationState::SELECT_DOCTOR->value;
+                    }
+                }
+
+                Log::info('[DialogueManager] Staying in SELECT_DOCTOR - no doctor found');
                 return ConversationState::SELECT_DOCTOR->value;
 
             case ConversationState::SELECT_DATE:
@@ -134,13 +180,139 @@ class DialogueManagerService implements DialogueManagerServiceInterface
                 return ConversationState::SELECT_DATE->value;
 
             case ConversationState::SHOW_AVAILABLE_SLOTS:
+                $collectedData = $context['collected_data'] ?? [];
+                $doctorId = $collectedData['doctor_id'] ?? null;
+                $date = $collectedData['date'] ?? null;
+
+                if ($doctorId && $date) {
+                    try {
+                        Log::info('[DialogueManager] Fetching available slots', [
+                            'doctor_id' => $doctorId,
+                            'date' => $date
+                        ]);
+
+                        // Get available slots from SlotService
+                        $slots = $this->slotService->getAvailableSlots($doctorId, Carbon::parse($date));
+
+                        if ($slots->isNotEmpty()) {
+                            // Format slots for display and store in session
+                            $formattedSlots = $slots->map(fn($s) => [
+                                'time' => date('h:i A', strtotime($s->start_time)),
+                                'start_time' => $s->start_time,
+                                'end_time' => $s->end_time,
+                                'slot_number' => $s->slot_number
+                            ])->toArray();
+
+                            // Create slot ranges for better display
+                            $slotRanges = $this->createSlotRanges($formattedSlots);
+
+                            Log::info('[DialogueManager] Available slots found', [
+                                'count' => $slots->count(),
+                                'formatted_slots' => $formattedSlots,
+                                'slot_ranges' => $slotRanges
+                            ]);
+
+                            // Store in session for LLM access
+                            if (isset($context['session_id'])) {
+                                $sessionManager = app(\App\Services\Conversation\SessionManagerServiceInterface::class);
+                                $sessionManager->updateCollectedData($context['session_id'], [
+                                    'available_slots' => $formattedSlots,
+                                    'slot_ranges' => $slotRanges,
+                                    'slots_count' => $slots->count()
+                                ]);
+                            }
+                        } else {
+                            Log::info('[DialogueManager] No available slots found', [
+                                'doctor_id' => $doctorId,
+                                'date' => $date
+                            ]);
+
+                            if (isset($context['session_id'])) {
+                                $sessionManager = app(\App\Services\Conversation\SessionManagerServiceInterface::class);
+                                $sessionManager->updateCollectedData($context['session_id'], [
+                                    'available_slots' => [],
+                                    'no_slots_available' => true
+                                ]);
+                            }
+                        }
+                    } catch (\Exception $e) {
+                        Log::error('[DialogueManager] Failed to fetch slots', [
+                            'doctor_id' => $doctorId,
+                            'date' => $date,
+                            'error' => $e->getMessage()
+                        ]);
+                    }
+                } else {
+                    Log::warning('[DialogueManager] Missing doctor_id or date for slot checking', [
+                        'doctor_id' => $doctorId,
+                        'date' => $date
+                    ]);
+                }
+
                 return ConversationState::SELECT_SLOT->value;
 
             case ConversationState::SELECT_SLOT:
                 $collectedData = $context['collected_data'] ?? [];
-                if ($entities->has('time') || isset($collectedData['time'])) {
-                    return ConversationState::CONFIRM_BOOKING->value;
+                $userMessage = $context['user_message'] ?? '';
+                $time = $entities->time ?? $collectedData['time'] ?? null;
+                $doctorId = $collectedData['doctor_id'] ?? null;
+                $date = $collectedData['date'] ?? null;
+
+                // Check if user is asking for available slots (not selecting a specific time)
+                $askingForSlots = stripos($userMessage, 'available slots') !== false ||
+                                 stripos($userMessage, 'what times') !== false ||
+                                 stripos($userMessage, 'what time') !== false ||
+                                 stripos($userMessage, 'what are') !== false;
+
+                if ($askingForSlots && $doctorId && $date) {
+                    Log::info('[DialogueManager] User asking for available slots - transitioning to SHOW_AVAILABLE_SLOTS', [
+                        'doctor_id' => $doctorId,
+                        'date' => $date
+                    ]);
+                    return ConversationState::SHOW_AVAILABLE_SLOTS->value;
                 }
+
+                if ($time && $doctorId && $date) {
+                    try {
+                        Log::info('[DialogueManager] Validating slot availability', [
+                            'time' => $time,
+                            'doctor_id' => $doctorId,
+                            'date' => $date
+                        ]);
+
+                        // Check if the requested time slot is actually available
+                        $availableSlots = $this->slotService->getAvailableSlots($doctorId, Carbon::parse($date));
+                        $requestedTime = $this->normalizeTime($time);
+
+                        $isSlotAvailable = $availableSlots->contains(function ($slot) use ($requestedTime) {
+                            $slotTime = $this->normalizeTime($slot->start_time);
+                            return $slotTime === $requestedTime;
+                        });
+
+                        if ($isSlotAvailable) {
+                            Log::info('[DialogueManager] Slot is available - proceeding to confirmation', [
+                                'time' => $time,
+                                'available_slots_count' => $availableSlots->count()
+                            ]);
+                            return ConversationState::CONFIRM_BOOKING->value;
+                        } else {
+                            Log::info('[DialogueManager] Requested slot not available - staying in SELECT_SLOT', [
+                                'requested_time' => $time,
+                                'available_slots' => $availableSlots->take(3)->map(fn($s) => $s->start_time)->toArray()
+                            ]);
+                            return ConversationState::SELECT_SLOT->value;
+                        }
+                    } catch (\Exception $e) {
+                        Log::error('[DialogueManager] Slot validation failed', [
+                            'time' => $time,
+                            'doctor_id' => $doctorId,
+                            'date' => $date,
+                            'error' => $e->getMessage()
+                        ]);
+                        return ConversationState::SELECT_SLOT->value;
+                    }
+                }
+
                 return ConversationState::SELECT_SLOT->value;
 
             case ConversationState::CONFIRM_BOOKING:
@@ -346,8 +518,8 @@ class DialogueManagerService implements DialogueManagerServiceInterface
      */
     private function generateLLMResponse(string $state, array $context): string
     {
-        $systemPrompt = $this->buildLLMSystemPrompt();
-        $userPrompt = "Current State: {$state}\nContext: " . json_encode($context) . "\n\nGenerate appropriate response.";
+        $systemPrompt = $this->buildContextAwareSystemPrompt();
+        $userPrompt = $this->buildContextAwareUserPrompt($state, $context);
 
         try {
             $response = $this->llm->chat($systemPrompt, [
@@ -467,5 +639,173 @@ Your goal is to guide the caller through the appointment process step-by-step.
 
 Follow the rules above and generate the best next message for the caller.
 PROMPT;
+    }
+
+    /**
+     * Build context-aware system prompt
+     */
+    private function buildContextAwareSystemPrompt(): string
+    {
+        $hospitalName = $this->hospitalName;
+        return <<<PROMPT
+You are a professional, friendly, efficient medical receptionist for {$hospitalName}.
+You are an ASSISTANT, not a decision-maker. Your role is to:
+1. Acknowledge what just happened
+2. Confirm what was collected
+3. Guide to the next step
+4. Never repeat questions for information already collected
+
+### Key Instructions
+- You must be aware of what information has already been collected
+- Never ask for information that's already been provided
+- Acknowledge recent user input explicitly
+- Guide smoothly to the next required step
+- Keep responses short (1-2 sentences)
+- Stay within your role as verbalizer of system decisions
+
+### CRITICAL: GREETING and DETECT_INTENT Rules
+- In GREETING or DETECT_INTENT states: Just give a simple welcome and ask generally how you can help
+- DO NOT suggest specific services like "check in" or "book appointment"
+- Wait for the user to tell you what they want
+- Be conversational, not transactional
+
+### State Awareness
+You will receive complete context about:
+- Current conversation state
+- What information has already been collected
+- What just happened in this turn
+- What comes next in the flow
+
+Never make flow decisions. Only verbalize what the system has already decided.
+PROMPT;
+    }
+
+    /**
+     * Build context-aware user prompt
+     */
+    private function buildContextAwareUserPrompt(string $state, array $context): string
+    {
+        $prompt = "CONVERSATION STATE: {$state}\n\n";
+
+        // Add what was just collected/happened
+        if (isset($context['recent_action'])) {
+            $prompt .= "RECENT ACTION: {$context['recent_action']}\n";
+        }
+
+        // Add what we already know
+        if (isset($context['collected_data']) && !empty($context['collected_data'])) {
+            $collected = $context['collected_data'];
+            unset($collected['available_slots']); // Remove large arrays
+            $prompt .= "ALREADY COLLECTED: " . json_encode($collected) . "\n";
+        }
+
+        // Add correction context
+        if (isset($context['correction_detected']) && $context['correction_detected']) {
+            $prompt .= "CORRECTION CONTEXT: User is correcting previously provided information\n";
+        }
+
+        // Add state-specific guidance
+        $prompt .= "\n" . $this->getStateSpecificResponseGuidance($state) . "\n";
+
+        $prompt .= "\nTASK: Generate a natural response that acknowledges the context and guides to the next step.";
+
+        return $prompt;
+    }
+
+    /**
+     * Get state-specific response guidance
+     */
+    private function getStateSpecificResponseGuidance(string $state): string
+    {
+        return match($state) {
+            'GREETING' => 'Give a warm, simple greeting and ask how you may help. Do NOT assume they want to check in or book. Just welcome them and ask what they need.',
+            'DETECT_INTENT' => 'Listen to what the user wants and help them. Do NOT jump to conclusions about check-ins or bookings.',
+            'SELECT_DATE' => 'If user provided a date, acknowledge it and proceed to check availability. If not, ask for appointment date.',
+            'SELECT_SLOT' => 'If user selected a time, check if it\'s available. If available slots exist, show them as ranges (e.g., "8:00 AM - 11:30 AM"). If user asks "what are the available slots", show the actual available times.',
+            'CONFIRM_BOOKING' => 'Present the booking details for confirmation. Ask for yes/no response.',
+            'SELECT_DOCTOR' => 'If doctor was selected, confirm and move to date selection. If not, ask for doctor preference.',
+            'COLLECT_PATIENT_NAME' => 'Acknowledge the name provided and move to next information needed.',
+            'COLLECT_PATIENT_DOB' => 'Acknowledge the date of birth and ask for contact information.',
+            'COLLECT_PATIENT_PHONE' => 'Acknowledge the phone number and proceed to doctor selection.',
+            'CLOSING' => 'Provide closing confirmation and offer additional assistance.',
+            default => 'Provide appropriate response based on context and guide conversation forward.',
+        };
+    }
+
+    /**
+     * Normalize time format for comparison
+     */
+    private function normalizeTime(string $time): string
+    {
+        // Remove spaces and convert to lowercase
+        $time = strtolower(trim($time));
+
+        // Convert 12-hour to 24-hour format
+        if (preg_match('/(\d{1,2}):?(\d{0,2})\s*(am|pm)/', $time, $matches)) {
+            $hour = (int)$matches[1];
+            $minute = $matches[2] ? (int)$matches[2] : 0;
+            $period = $matches[3];
+
+            if ($period === 'pm' && $hour !== 12) {
+                $hour += 12;
+            } elseif ($period === 'am' && $hour === 12) {
+                $hour = 0;
+            }
+
+            return sprintf('%02d:%02d', $hour, $minute);
+        }
+
+        // If it's already in HH:MM format, return as is
+        if (preg_match('/^\d{1,2}:\d{2}$/', $time)) {
+            return sprintf('%02d:%02d', ...explode(':', $time));
+        }
+
+        return $time;
+    }
+
+    /**
+     * Create slot ranges for better display
+     */
+    private function createSlotRanges(array $slots): array
+    {
+        if (empty($slots)) {
+            return [];
+        }
+
+        $ranges = [];
+        $currentRange = null;
+
+        foreach ($slots as $slot) {
+            $time = $slot['time'];
+
+            if ($currentRange === null) {
+                $currentRange = ['start' => $time, 'end' => $time];
+            } else {
+                // Check if this slot continues the current range
+                $prevTime = strtotime(substr($currentRange['end'], 0, -3)); // Remove AM/PM
+                $currTime = strtotime(substr($time, 0, -3)); // Remove AM/PM
+
+                // If the time difference is 15 minutes (typical slot duration), continue the range
+                if (($currTime - $prevTime) === 900) { // 15 minutes = 900 seconds
+                    $currentRange['end'] = $time;
+                } else {
+                    // Start a new range
+                    $ranges[] = $currentRange;
+                    $currentRange = ['start' => $time, 'end' => $time];
+                }
+            }
+        }
+
+        // Add the last range
+        if ($currentRange) {
+            $ranges[] = $currentRange;
+        }
+
+        // Format ranges as strings
+        return array_map(function($range) {
+            return $range['start'] === $range['end']
+                ? $range['start']
+                : $range['start'] . ' - ' . $range['end'];
+        }, $ranges);
     }
 }

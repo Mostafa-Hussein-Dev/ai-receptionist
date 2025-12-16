@@ -168,25 +168,71 @@ PROMPT;
     {
         $prompt = "User Message: \"{$userMessage}\"\n\n";
 
-        // Add conversation history if available
+        // Add comprehensive state context
+        if (isset($context['conversation_state'])) {
+            $prompt .= "CONVERSATION STATE: {$context['conversation_state']}\n";
+
+            // Add what we already know
+            if (isset($context['collected_data']) && !empty($context['collected_data'])) {
+                $prompt .= "ALREADY COLLECTED: " . json_encode($context['collected_data']) . "\n";
+            }
+
+            // Add flow context guidance
+            $prompt .= "FLOW CONTEXT: " . $this->getFlowContext($context['conversation_state']) . "\n";
+        }
+
+        // Add recent conversation history
         if (!empty($context['conversation_history'])) {
-            $prompt .= "Recent Conversation:\n";
-            foreach ($context['conversation_history'] as $turn) {
+            $prompt .= "\nRECENT CONVERSATION:\n";
+            foreach (array_slice($context['conversation_history'], -3) as $turn) {
                 $role = $turn['role'] ?? 'user';
                 $content = $turn['content'] ?? '';
                 $prompt .= "{$role}: {$content}\n";
             }
-            $prompt .= "\n";
         }
 
-        // Add current conversation state if available
+        // Add state-specific disambiguation
         if (isset($context['conversation_state'])) {
-            $prompt .= "Current State: {$context['conversation_state']}\n\n";
+            $prompt .= "\nSTATE-SPECIFIC INTERPRETATION:\n";
+            $prompt .= $this->getStateSpecificInterpretation($context['conversation_state']) . "\n";
         }
 
-        $prompt .= "Classify the intent of the most recent user message.";
+        $prompt .= "\nTASK: Classify the intent considering the conversation flow and context.";
 
         return $prompt;
+    }
+
+    /**
+     * Get flow context for conversation state
+     */
+    private function getFlowContext(string $state): string
+    {
+        return match($state) {
+            'SELECT_DATE' => 'User is providing appointment date. Date inputs like "2025-12-20", "tomorrow", "next Monday" should be interpreted as PROVIDE_INFO intent.',
+            'SELECT_SLOT' => 'User is selecting appointment time. Time inputs like "10:00", "morning", "2 PM" should be interpreted as PROVIDE_INFO intent.',
+            'CONFIRM_BOOKING' => 'User is responding to confirmation question. "yes", "confirm", "that\'s right" = CONFIRM intent. "no", "wrong", "change" = NEGATIVE intent.',
+            'SELECT_DOCTOR' => 'User is selecting healthcare provider. Doctor names or departments should be interpreted as PROVIDE_INFO intent.',
+            'COLLECT_PATIENT_*' => 'User is providing personal information. Names, DOB, phone numbers should be interpreted as PROVIDE_INFO intent.',
+            'VERIFY_PATIENT' => 'User information is being verified. Corrections should be interpreted as CORRECTION intent.',
+            default => 'Standard conversation flow - interpret based on message content.',
+        };
+    }
+
+    /**
+     * Get state-specific interpretation guidance
+     */
+    private function getStateSpecificInterpretation(string $state): string
+    {
+        return match($state) {
+            'SELECT_DATE' => 'In this state, any date-related input should be classified as PROVIDE_INFO, not GENERAL_INQUIRY. The user is clearly providing what was asked for.',
+            'SELECT_SLOT' => 'In this state, any time-related input should be classified as PROVIDE_INFO. The user is selecting from available options.',
+            'CONFIRM_BOOKING' => 'Look for explicit confirmation (yes/no) or correction signals. Avoid defaulting to GENERAL_INQUIRY.',
+            'SELECT_DOCTOR' => 'Names of doctors or departments should be PROVIDE_INFO. Medical questions should be GENERAL_INQUIRY.',
+            'COLLECT_PATIENT_NAME' => 'Person names should be PROVIDE_INFO. Avoid classifying names as DOCTOR_QUERY unless context suggests it.',
+            'COLLECT_PATIENT_DOB' => 'Birth dates should be PROVIDE_INFO. Look for date patterns or age-related phrases.',
+            'COLLECT_PATIENT_PHONE' => 'Phone numbers should be PROVIDE_INFO. Look for numeric patterns or contact information.',
+            default => 'Use general intent classification based on message content.',
+        };
     }
 
     /**

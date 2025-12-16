@@ -80,6 +80,7 @@ class AIServiceProvider extends ServiceProvider
         $this->app->singleton(DialogueManagerServiceInterface::class, function ($app) {
             return new DialogueManagerService(
                 $app->make(\App\Services\Business\DoctorService::class),
+                $app->make(\App\Services\Business\SlotService::class),
                 $app->make(\App\Services\Business\AppointmentService::class),
                 $app->make(LLMServiceInterface::class)
             );

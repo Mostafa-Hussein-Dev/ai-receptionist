@@ -157,6 +157,13 @@ Rules:
 4. Format times as HH:MM in 24-hour format
 5. Include country code for phone numbers (assume +961 if not specified)
 
+IMPORTANT: Extract entities even when they are embedded in longer sentences or questions.
+Examples:
+- "what times are available Friday" → extract date: Friday
+- "I want to see Dr. Smith tomorrow" → extract doctor_name: Dr. Smith, date: tomorrow
+- "can you book me for 2 PM" → extract time: 14:00
+- "my phone is 1234567" → extract phone: +9611234567
+
 State-Specific Entity Extraction Rules:
 - GREETING: Extract NO entities
 - DETECT_INTENT: Extract ALL entities for initial routing
@@ -226,6 +233,40 @@ PROMPT;
         $prompt .= "Extract all mentioned entities and return as JSON.";
 
         return $prompt;
+    }
+
+    /**
+     * Get current state focus - what we're specifically looking for
+     */
+    private function getCurrentStateFocus(string $state): string
+    {
+        return match($state) {
+            'SELECT_DATE' => 'Extract appointment date in YYYY-MM-DD format. User is providing when they want to schedule.',
+            'SELECT_SLOT' => 'Extract appointment time in HH:MM format. User is selecting from available time slots.',
+            'COLLECT_PATIENT_NAME' => 'Extract patient full name. User is introducing themselves.',
+            'COLLECT_PATIENT_DOB' => 'Extract date of birth in YYYY-MM-DD format. User is providing age verification.',
+            'COLLECT_PATIENT_PHONE' => 'Extract phone number with country code. User is providing contact information.',
+            'SELECT_DOCTOR' => 'Extract doctor name or department. User is selecting which healthcare provider to see.',
+            'SHOW_AVAILABLE_SLOTS' => 'Extract time preference. User is indicating when they prefer appointments.',
+            default => 'Extract relevant entities based on context.',
+        };
+    }
+
+    /**
+     * Get state-specific extraction rules
+     */
+    private function getStateSpecificRules(string $state): string
+    {
+        return match($state) {
+            'SELECT_DATE' => 'Focus on date patterns: YYYY-MM-DD, "tomorrow", "next Monday", "Jan 15", "Friday", "this Friday", "next Friday", etc. Convert to YYYY-MM-DD. Extract dates even when embedded in sentences like "what times are available Friday" or "I want Friday for my appointment". Do NOT extract times.',
+            'SELECT_SLOT' => 'Focus on time patterns: HH:MM, "10 AM", "2:30 PM", "morning", etc. Convert to HH:MM 24h format. Do NOT extract dates.',
+            'COLLECT_PATIENT_NAME' => 'Extract full names only. Ignore titles, dates, times, phone numbers.',
+            'COLLECT_PATIENT_DOB' => 'Extract birth dates only. Look for patterns like "born on", "DOB", "birthday", etc. Convert to YYYY-MM-DD.',
+            'COLLECT_PATIENT_PHONE' => 'Extract phone numbers only. Include country code if provided. Format as +XXXXXXXXXX.',
+            'SELECT_DOCTOR' => 'Extract doctor names (with/without "Dr.") or department names. Be careful not to extract patient names here.',
+            'SHOW_AVAILABLE_SLOTS' => 'Extract time preferences. User may say "morning", "afternoon", "10 AM", etc.',
+            default => 'Extract any relevant entities while avoiding false positives.',
+        };
     }
 
     /**

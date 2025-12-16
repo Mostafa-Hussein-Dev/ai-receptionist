@@ -159,7 +159,9 @@ class ConversationOrchestrator
             $session = $this->sessionManager->get($sessionId);
 
             // Check if we can auto-advance to the next state if we already have all required data
-            if ($this->dialogueManager->canProceed($nextState, $session->collectedData)) {
+            // Don't auto-advance from SHOW_AVAILABLE_SLOTS - we need to display slots first
+            if (($this->dialogueManager->canProceed($nextState, $session->collectedData) || $nextState === ConversationState::BOOK_APPOINTMENT->value) &&
+                $nextState !== ConversationState::SHOW_AVAILABLE_SLOTS->value) {
                 // Get the next state after current one
                 $autoAdvanceState = $this->dialogueManager->getNextState(
                     $nextState,
@@ -167,6 +169,63 @@ class ConversationOrchestrator
                     $entities,
                     ['collected_data' => $session->collectedData, 'user_message' => $userMessage]
                 );
+
+                // Booking Execution Logic - Check for EXECUTE_BOOKING transition
+                Log::info('[DEBUG] Checking booking execution', [
+                    'nextState' => $nextState,
+                    'autoAdvanceState' => $autoAdvanceState,
+                    'CONFIRM_BOOKING' => ConversationState::CONFIRM_BOOKING->value,
+                    'EXECUTE_BOOKING' => ConversationState::EXECUTE_BOOKING->value,
+                    'condition1' => $nextState === ConversationState::CONFIRM_BOOKING->value,
+                    'condition2' => $autoAdvanceState === ConversationState::EXECUTE_BOOKING->value,
+                    'condition3' => $nextState === ConversationState::EXECUTE_BOOKING->value
+                ]);
+
+                if ($nextState === ConversationState::EXECUTE_BOOKING->value ||
+                    ($nextState === ConversationState::CONFIRM_BOOKING->value && $autoAdvanceState === ConversationState::EXECUTE_BOOKING->value)) {
+                    Log::info('[DEBUG] Executing booking during CONFIRM->EXECUTE transition', [
+                        'current_state' => $session->conversationState,
+                        'next_state' => $nextState,
+                        'auto_advance_state' => $autoAdvanceState
+                    ]);
+
+                    $doctorName = $session->collectedData['doctor_name'] ?? 'the doctor';
+                    $date = $session->collectedData['date'] ?? null;
+                    $time = $session->collectedData['time'] ?? null;
+                    $patientName = $session->collectedData['patient_name'] ?? 'Patient';
+
+                    if ($date && $time) {
+                        try {
+                            $appointment = $this->executeBooking($session);
+
+                            // Update session with appointment ID
+                            $this->sessionManager->update($sessionId, ['appointment_id' => $appointment->id]);
+
+                            return $this->earlyTurnDTO(
+                                $sessionId,
+                                $userMessage,
+                                "✅ Your appointment is confirmed: {$patientName} with {$doctorName} on {$date} at {$time}. Appointment ID: {$appointment->id}. Is there anything else I can help you with?",
+                                $session,
+                                $intent,
+                                $entities
+                            );
+                        } catch (\Exception $e) {
+                            Log::error('[ConversationOrchestrator] Booking execution failed', [
+                                'session' => $sessionId,
+                                'error' => $e->getMessage()
+                            ]);
+
+                            return $this->earlyTurnDTO(
+                                $sessionId,
+                                $userMessage,
+                                "❌ I'm sorry, there was an error confirming your appointment. Please try again or contact our reception desk directly.",
+                                $session,
+                                $intent,
+                                $entities
+                            );
+                        }
+                    }
+                }
 
                 // Only auto-advance if it's a different state
                 if ($autoAdvanceState !== $nextState) {
@@ -181,6 +240,162 @@ class ConversationOrchestrator
                         'conversation_state' => $nextState,
                     ]);
                     $session = $this->sessionManager->get($sessionId);
+                }
+            }
+
+            // Available Slots Display Logic
+            if ($nextState === ConversationState::SHOW_AVAILABLE_SLOTS->value) {
+                $doctorId = $session->collectedData['doctor_id'] ?? null;
+                $date = $session->collectedData['date'] ?? null;
+
+                if ($doctorId && $date) {
+                    try {
+                        Log::info('[ConversationOrchestrator] Fetching available slots for display', [
+                            'doctor_id' => $doctorId,
+                            'date' => $date
+                        ]);
+
+                        $slots = $this->slotService->getAvailableSlots($doctorId, new \Carbon\Carbon($date));
+
+                        if ($slots->isNotEmpty()) {
+                            // Format slots for display
+                            $formattedSlots = $slots->map(fn($s) => date('h:i A', strtotime($s->start_time)))->toArray();
+
+                            // Create slot ranges
+                            $slotRanges = $this->createSlotRangesForDisplay($slots->toArray());
+
+                            // Store in session for LLM access
+                            $this->sessionManager->updateCollectedData($sessionId, [
+                                'available_slots' => $formattedSlots,
+                                'slot_ranges' => $slotRanges,
+                                'slots_count' => $slots->count()
+                            ]);
+
+                            Log::info('[ConversationOrchestrator] Available slots stored for display', [
+                                'count' => $slots->count(),
+                                'slot_ranges' => $slotRanges,
+                                'sample_slots' => array_slice($formattedSlots, 0, 3)
+                            ]);
+                        } else {
+                            $this->sessionManager->updateCollectedData($sessionId, [
+                                'available_slots' => [],
+                                'no_slots_available' => true
+                            ]);
+
+                            Log::info('[ConversationOrchestrator] No available slots found', [
+                                'doctor_id' => $doctorId,
+                                'date' => $date
+                            ]);
+                        }
+                    } catch (\Exception $e) {
+                        Log::error('[ConversationOrchestrator] Failed to fetch slots', [
+                            'doctor_id' => $doctorId,
+                            'date' => $date,
+                            'error' => $e->getMessage()
+                        ]);
+                    }
+                }
+            }
+
+            //Doctor Selection Logic (process entities BEFORE auto-advance check)
+            if ($nextState === ConversationState::SELECT_DOCTOR->value) {
+                $doctorName = $entities->doctorName ?? $session->collectedData['doctor_name'] ?? null;
+                $department = $entities->department ?? $session->collectedData['department'] ?? null;
+
+                Log::info('[ConversationOrchestrator] SELECT_DOCTOR business logic starting', [
+                    'doctorName' => $doctorName,
+                    'department' => $department,
+                    'entities_doctorName' => $entities->doctorName,
+                    'collected_doctor_name' => $session->collectedData['doctor_name'] ?? null,
+                    'collected_department' => $session->collectedData['department'] ?? null
+                ]);
+
+                // CASE 1: User provided a doctor name
+                if ($doctorName) {
+                    Log::info('[ConversationOrchestrator] Searching for doctor', ['doctorName' => $doctorName]);
+                    try {
+                        // First attempt: search by name
+                        $doctors = $this->doctorService->searchDoctors($doctorName);
+                        Log::info('[ConversationOrchestrator] Doctor search results', [
+                            'search_term' => $doctorName,
+                            'results_count' => $doctors->count(),
+                            'results' => $doctors->map(fn($d) => "Dr. {$d->first_name} {$d->last_name}")->toArray()
+                        ]);
+
+                        // EXACT MATCH
+                        if ($doctors->count() === 1) {
+                            $doctor = $doctors->first();
+
+                            $this->sessionManager->updateCollectedData($sessionId, [
+                                'doctor_id' => $doctor->id,
+                                'doctor_name' => "Dr. {$doctor->first_name} {$doctor->last_name}",
+                                'department' => $doctor->department->name ?? null,
+                            ]);
+
+                            Log::info('[ConversationOrchestrator] Doctor selected', [
+                                'doctor_id' => $doctor->id,
+                                'doctor_name' => "Dr. {$doctor->first_name} {$doctor->last_name}",
+                                'department' => $doctor->department->name ?? null,
+                            ]);
+
+                            // Update session data for the rest of the flow
+                            $session = $this->sessionManager->get($sessionId);
+                        }
+
+                        // MULTIPLE MATCHES
+                        elseif ($doctors->count() > 1) {
+                            $names = $doctors->map(fn($d) =>
+                                "Dr. {$d->first_name} {$d->last_name}" .
+                                ($d->department ? " ({$d->department->name})" : "")
+                            )->implode(', ');
+
+                            return $this->earlyTurnDTO(
+                                $sessionId,
+                                $userMessage,
+                                "I found several doctors with that name: {$names}. Which one would you prefer?",
+                                $session,
+                                $intent,
+                                $entities
+                            );
+                        }
+
+                        // NO MATCH - offer alternatives
+                        else {
+                            Log::info('[ConversationOrchestrator] No doctor found', [
+                                'search_term' => $doctorName,
+                                'search_type' => 'by_name'
+                            ]);
+                            // Try to suggest similar names or departments
+                            $availableDepartments = $this->doctorService->getAvailableDepartments()
+                                ->pluck('name')
+                                ->take(5)
+                                ->implode(', ');
+
+                            return $this->earlyTurnDTO(
+                                $sessionId,
+                                $userMessage,
+                                "I couldn't find a doctor with that name. Could you try the full name or tell me which department you prefer? We have: {$availableDepartments}.",
+                                $session,
+                                $intent,
+                                $entities
+                            );
+                        }
+
+                    } catch (\Exception $e) {
+                        Log::error('[ConversationOrchestrator] Doctor search failed', [
+                            'doctor_name' => $doctorName,
+                            'error' => $e->getMessage()
+                        ]);
+
+                        return $this->earlyTurnDTO(
+                            $sessionId,
+                            $userMessage,
+                            "I'm having trouble searching for doctors right now. Could you tell me which department you'd prefer instead?",
+                            $session,
+                            $intent,
+                            $entities
+                        );
+                    }
                 }
             }
 
@@ -279,503 +494,8 @@ class ConversationOrchestrator
                 }
             }
 
-            //Doctor Selection
-            if ($nextState === ConversationState::SELECT_DOCTOR->value) {
-                $doctorName = $entities->doctorName ?? $session->collectedData['doctor_name'] ?? null;
-                $department = $entities->department ?? $session->collectedData['department'] ?? null;
-
-                Log::info('[ConversationOrchestrator] SELECT_DOCTOR business logic starting', [
-                    'doctorName' => $doctorName,
-                    'department' => $department,
-                    'entities_doctorName' => $entities->doctorName,
-                    'collected_doctor_name' => $session->collectedData['doctor_name'] ?? null,
-                    'collected_department' => $session->collectedData['department'] ?? null
-                ]);
-
-                // CASE 1: User provided a doctor name
-                if ($doctorName) {
-                    Log::info('[ConversationOrchestrator] Searching for doctor', ['doctorName' => $doctorName]);
-                    try {
-                        // First attempt: search by name
-                        $doctors = $this->doctorService->searchDoctors($doctorName);
-                        Log::info('[ConversationOrchestrator] Doctor search results', [
-                            'search_term' => $doctorName,
-                            'results_count' => $doctors->count(),
-                            'results' => $doctors->map(fn($d) => "Dr. {$d->first_name} {$d->last_name}")->toArray()
-                        ]);
-
-                        // EXACT MATCH
-                        if ($doctors->count() === 1) {
-                            $doctor = $doctors->first();
-
-                            $this->sessionManager->updateCollectedData($sessionId, [
-                                'doctor_id' => $doctor->id,
-                                'doctor_name' => "Dr. {$doctor->first_name} {$doctor->last_name}",
-                                'department' => $doctor->department->name ?? null,
-                            ]);
-
-                            Log::info('[ConversationOrchestrator] Doctor selected', [
-                                'doctor_id' => $doctor->id,
-                                'doctor_name' => "Dr. {$doctor->first_name} {$doctor->last_name}",
-                                'department' => $doctor->department->name ?? null,
-                            ]);
-
-                            // Continue with normal flow - doctor successfully selected
-                        }
-
-                        // MULTIPLE MATCHES
-                        elseif ($doctors->count() > 1) {
-                            $names = $doctors->map(fn($d) =>
-                                "Dr. {$d->first_name} {$d->last_name}" .
-                                ($d->department ? " ({$d->department->name})" : "")
-                            )->implode(', ');
-
-                            return $this->earlyTurnDTO(
-                                $sessionId,
-                                $userMessage,
-                                "I found several doctors with that name: {$names}. Which one would you prefer?",
-                                $session,
-                                $intent,
-                                $entities
-                            );
-                        }
-
-                        // NO MATCH - offer alternatives
-                        else {
-                            Log::info('[ConversationOrchestrator] No doctor found', [
-                                'search_term' => $doctorName,
-                                'search_type' => 'by_name'
-                            ]);
-                            // Try to suggest similar names or departments
-                            $availableDepartments = $this->doctorService->getAvailableDepartments()
-                                ->pluck('name')
-                                ->take(5)
-                                ->implode(', ');
-
-                            return $this->earlyTurnDTO(
-                                $sessionId,
-                                $userMessage,
-                                "I couldn't find a doctor with that name. Could you try the full name or tell me which department you prefer? We have: {$availableDepartments}.",
-                                $session,
-                                $intent,
-                                $entities
-                            );
-                        }
-
-                    } catch (\Exception $e) {
-                        Log::error('[ConversationOrchestrator] Doctor search failed', [
-                            'doctor_name' => $doctorName,
-                            'error' => $e->getMessage()
-                        ]);
-
-                        return $this->earlyTurnDTO(
-                            $sessionId,
-                            $userMessage,
-                            "I'm having trouble searching for doctors right now. Could you tell me which department you'd prefer instead?",
-                            $session,
-                            $intent,
-                            $entities
-                        );
-                    }
-                }
-
-                // CASE 2: User provided department
-                elseif ($department) {
-                    try {
-                        $doctors = $this->doctorService->getDoctorsByDepartmentName($department);
-
-                        if ($doctors->isEmpty()) {
-                            // Suggest alternative departments
-                            $availableDepartments = $this->doctorService->getAvailableDepartments()
-                                ->pluck('name')
-                                ->take(5)
-                                ->implode(', ');
-
-                            return $this->earlyTurnDTO(
-                                $sessionId,
-                                $userMessage,
-                                "I couldn't find any doctors in {$department}. Available departments include: {$availableDepartments}. Which would you prefer?",
-                                $session,
-                                $intent,
-                                $entities
-                            );
-                        }
-
-                        // Single doctor in department
-                        if ($doctors->count() === 1) {
-                            $doctor = $doctors->first();
-                            $this->sessionManager->updateCollectedData($sessionId, [
-                                'doctor_id' => $doctor->id,
-                                'doctor_name' => "Dr. {$doctor->first_name} {$doctor->last_name}",
-                                'department' => $department,
-                            ]);
-
-                            Log::info('[ConversationOrchestrator] Doctor selected by department', [
-                                'doctor_id' => $doctor->id,
-                                'doctor_name' => "Dr. {$doctor->first_name} {$doctor->last_name}",
-                                'department' => $department,
-                            ]);
-
-                            // Continue with normal flow
-                        }
-
-                        // Multiple doctors in department
-                        else {
-                            $names = $doctors->map(fn($d) => "Dr. {$d->first_name} {$d->last_name}")->implode(', ');
-                            return $this->earlyTurnDTO(
-                                $sessionId,
-                                $userMessage,
-                                "We have several doctors in {$department}: {$names}. Which one would you prefer?",
-                                $session,
-                                $intent,
-                                $entities
-                            );
-                        }
-
-                    } catch (\Exception $e) {
-                        Log::error('[ConversationOrchestrator] Department search failed', [
-                            'department' => $department,
-                            'error' => $e->getMessage()
-                        ]);
-
-                        return $this->earlyTurnDTO(
-                            $sessionId,
-                            $userMessage,
-                            "I'm having trouble finding doctors in that department. Could you provide a specific doctor's name instead?",
-                            $session,
-                            $intent,
-                            $entities
-                        );
-                    }
-                }
-
-                // CASE 3: No doctor or department provided yet
-                else {
-                    // User hasn't specified doctor or department yet - ask them to provide one
-                    return $this->earlyTurnDTO(
-                        $sessionId,
-                        $userMessage,
-                        "Which doctor would you like to see, or do you have a preference for a department?",
-                        $session,
-                        $intent,
-                        $entities
-                    );
-                }
-            }
-
-            // Show Available Slots Logic
-            if ($nextState === ConversationState::SHOW_AVAILABLE_SLOTS->value) {
-                $doctorId = $session->collectedData['doctor_id'] ?? null;
-                $date = $session->collectedData['date'] ?? null;
-
-                Log::info('[ConversationOrchestrator] SHOW_AVAILABLE_SLOTS called', [
-                    'doctor_id' => $doctorId,
-                    'date' => $date,
-                    'collected_data' => $session->collectedData
-                ]);
-
-                if (!$doctorId) {
-                    return $this->earlyTurnDTO(
-                        $sessionId,
-                        $userMessage,
-                        "I need to confirm which doctor you'd like to see. Which doctor would you prefer?",
-                        $session,
-                        $intent,
-                        $entities
-                    );
-                }
-
-                if (!$date) {
-                    return $this->earlyTurnDTO(
-                        $sessionId,
-                        $userMessage,
-                        "What date would you like for your appointment?",
-                        $session,
-                        $intent,
-                        $entities
-                    );
-                }
-
-                try {
-                    // Convert string date to Carbon object
-                    $carbonDate = is_string($date) ? Carbon::parse($date) : $date;
-                    $availableSlots = $this->slotService->getAvailableSlots($doctorId, $carbonDate);
-
-                    if ($availableSlots->isEmpty()) {
-                        return $this->earlyTurnDTO(
-                            $sessionId,
-                            $userMessage,
-                            "I'm sorry, there are no available appointments on {$date}. Would you like to try a different day?",
-                            $session,
-                            $intent,
-                            $entities
-                        );
-                    }
-
-                    // Format slots like: "09:00, 10:30, 14:00"
-                    $formatted = $availableSlots
-                        ->map(fn($slot) => substr($slot->start_time, 0, 5))
-                        ->implode(', ');
-
-                    // Store slot list for validation with database IDs
-                    $this->sessionManager->updateCollectedData($sessionId, [
-                        'available_slots' => $availableSlots->map(fn($s) => [
-                            'id' => $s->id,  // Database slot ID
-                            'slot_number' => $s->slot_number,
-                            'time' => substr($s->start_time, 0, 5),
-                            'start_time' => $s->start_time,
-                            'end_time' => $s->end_time,
-                        ])->toArray()
-                    ]);
-
-                    return $this->earlyTurnDTO(
-                        $sessionId,
-                        $userMessage,
-                        "Here are the available times for {$date}: {$formatted}. Which time works best for you?",
-                        $session,
-                        $intent,
-                        $entities
-                    );
-
-                } catch (\Exception $e) {
-                    Log::error('[ConversationOrchestrator] Slot retrieval failed', [
-                        'error' => $e->getMessage()
-                    ]);
-
-                    return $this->earlyTurnDTO(
-                        $sessionId,
-                        $userMessage,
-                        "I'm having trouble checking available times. Would you like to try a different date?",
-                        $session,
-                        $intent,
-                        $entities
-                    );
-                }
-            }
-
-            // Slot Selection Logic
-            if ($nextState === ConversationState::SELECT_SLOT->value) {
-                $selectedTime = $entities->time ?? null;
-                $availableSlots = $session->collectedData['available_slots'] ?? [];
-
-                Log::info('[ConversationOrchestrator] SELECT_SLOT business logic starting', [
-                    'selectedTime' => $selectedTime,
-                    'entities_time' => $entities->time,
-                    'available_slots_count' => count($availableSlots),
-                    'session_time' => $session->collectedData['time'] ?? null
-                ]);
-
-                if (!$selectedTime) {
-                    return $this->earlyTurnDTO(
-                        $sessionId,
-                        $userMessage,
-                        "I didn't catch the time you prefer. Which of the available times works best for you?",
-                        $session,
-                        $intent,
-                        $entities
-                    );
-                }
-
-                if (empty($availableSlots)) {
-                    return $this->earlyTurnDTO(
-                        $sessionId,
-                        $userMessage,
-                        "I need to refresh the available time slots. Let me check what's available for your appointment date.",
-                        $session,
-                        $intent,
-                        $entities
-                    );
-                }
-
-                // Normalize the selected time format to match slot times
-                $normalizedTime = $this->normalizeTimeFormat($selectedTime);
-
-                Log::info('[ConversationOrchestrator] Time matching', [
-                    'selected_time' => $selectedTime,
-                    'normalized_time' => $normalizedTime,
-                    'available_slots_times' => collect($availableSlots)->pluck('time')->toArray()
-                ]);
-
-                // Validate the selected time is available
-                $matchedSlot = collect($availableSlots)->first(
-                    fn($slot) => $slot['time'] === $normalizedTime
-                );
-
-                if (!$matchedSlot) {
-                    $validTimes = collect($availableSlots)->pluck('time')->implode(', ');
-                    return $this->earlyTurnDTO(
-                        $sessionId,
-                        $userMessage,
-                        "That time isn't available. The available times are: {$validTimes}. Which would you prefer?",
-                        $session,
-                        $intent,
-                        $entities
-                    );
-                }
-
-                // Get doctor's slots_per_appointment requirement
-                $doctor = $this->doctorService->getDoctor($session->collectedData['doctor_id']);
-                $slotsRequired = (int) ($doctor->slots_per_appointment ?? 1); // Ensure integer
-
-                Log::info('[ConversationOrchestrator] Slot calculation', [
-                    'doctor_id' => $session->collectedData['doctor_id'],
-                    'slots_required_raw' => $doctor->slots_per_appointment ?? 'default',
-                    'slots_required_cast' => $slotsRequired,
-                    'matched_slot' => $matchedSlot
-                ]);
-
-                // Calculate the actual appointment end time considering multiple slots
-                $appointmentStartTime = \Carbon\Carbon::parse($matchedSlot['start_time']);
-                $endTime = $appointmentStartTime->copy()->addMinutes($slotsRequired * 15); // Each slot is 15 minutes
-
-                // Store selected slot information with database ID and calculated end time
-                $this->sessionManager->updateCollectedData($sessionId, [
-                    'selected_time' => $selectedTime,
-                    'slot_id' => $matchedSlot['id'],  // Database slot ID
-                    'slot_number' => $matchedSlot['slot_number'],
-                    'slot_count' => $slotsRequired,
-                    'start_time' => $matchedSlot['start_time'],
-                    'end_time' => $endTime->format('H:i:s'),
-                ]);
-            }
-
-            // Booking Confirmation Logic
-            if ($nextState === ConversationState::CONFIRM_BOOKING->value) {
-                $doctorName = $session->collectedData['doctor_name'] ?? 'the doctor';
-                $date = $session->collectedData['date'] ?? null;
-                $time = $session->collectedData['selected_time'] ?? null;
-                $patientName = $session->collectedData['patient_name'] ?? 'Patient';
-
-                if (!$date) {
-                    return $this->earlyTurnDTO(
-                        $sessionId,
-                        $userMessage,
-                        "What date would you like for your appointment?",
-                        $session,
-                        $intent,
-                        $entities
-                    );
-                }
-
-                if (!$time) {
-                    return $this->earlyTurnDTO(
-                        $sessionId,
-                        $userMessage,
-                        "What time would you prefer for your appointment?",
-                        $session,
-                        $intent,
-                        $entities
-                    );
-                }
-
-                return $this->earlyTurnDTO(
-                    $sessionId,
-                    $userMessage,
-                    "Let me confirm your appointment: {$patientName} with {$doctorName} on {$date} at {$time}. Is this correct? Please say 'yes' to confirm or 'no' to make changes.",
-                    $session,
-                    $intent,
-                    $entities
-                );
-            }
-
-            // Execute Booking Logic
-            if ($nextState === ConversationState::EXECUTE_BOOKING->value) {
-                $patientId = $session->patientId ?? null;
-                $doctorId = $session->collectedData['doctor_id'] ?? null;
-                $date = $session->collectedData['date'] ?? null;
-                $time = $session->collectedData['selected_time'] ?? null;
-                $slotId = $session->collectedData['slot_id'] ?? null;
-                $slotCount = $session->collectedData['slot_count'] ?? 1;
-                $appointmentStartTime = $session->collectedData['start_time'] ?? $time;
-
-                Log::info('[ConversationOrchestrator] EXECUTE_BOOKING validation', [
-                    'patientId' => $patientId,
-                    'doctor_id' => $doctorId,
-                    'date' => $date,
-                    'time' => $time,
-                    'slot_id' => $slotId,
-                    'slot_count' => $slotCount,
-                    'start_time' => $startTime,
-                    'collected_data' => $session->collectedData
-                ]);
-
-                if (!$patientId || !$doctorId || !$date || !$time || !$slotId) {
-                    Log::error('[ConversationOrchestrator] EXECUTE_BOOKING missing data', [
-                        'missing_patientId' => !$patientId,
-                        'missing_doctorId' => !$doctorId,
-                        'missing_date' => !$date,
-                        'missing_time' => !$time,
-                        'missing_slotId' => !$slotId
-                    ]);
-                    // Give specific error message about what's missing
-                    $missingParts = [];
-                    if (!$patientId) $missingParts[] = "patient verification";
-                    if (!$doctorId) $missingParts[] = "doctor selection";
-                    if (!$date) $missingParts[] = "appointment date";
-                    if (!$time) $missingParts[] = "appointment time";
-
-                    $errorMessage = "I need to complete a few steps before booking: " . implode(', ', $missingParts) . ". Let me help you with this.";
-
-                    return $this->earlyTurnDTO(
-                        $sessionId,
-                        $userMessage,
-                        $errorMessage,
-                        $session,
-                        $intent,
-                        $entities
-                    );
-                }
-
-                try {
-                    // Book the appointment with proper slot data
-                    $appointment = $this->appointmentService->bookAppointment([
-                        'patient_id' => $patientId,
-                        'doctor_id' => $doctorId,
-                        'date' => $date,
-                        'start_time' => $appointmentStartTime,
-                        'slot_id' => $slotId,
-                        'slot_count' => $slotCount,
-                        'type' => 'general',
-                        'reason' => 'Patient booking via AI receptionist'
-                    ]);
-
-                    // Clean up by removing the large available_slots array after successful booking
-                    $this->sessionManager->removeCollectedData($sessionId, ['available_slots']);
-
-                    return $this->earlyTurnDTO(
-                        $sessionId,
-                        $userMessage,
-                        "✅ Perfect! Your appointment has been successfully booked for {$date} at {$time}. You'll receive a confirmation. Is there anything else I can help you with?",
-                        $session,
-                        $intent,
-                        $entities
-                    );
-
-                } catch (AppointmentException $e) {
-                    return $this->earlyTurnDTO(
-                        $sessionId,
-                        $userMessage,
-                        "I'm sorry, that appointment time is no longer available. Would you like me to check for other available times?",
-                        $session,
-                        $intent,
-                        $entities
-                    );
-                } catch (\Exception $e) {
-                    Log::error('[ConversationOrchestrator] Booking failed', [
-                        'error' => $e->getMessage()
-                    ]);
-
-                    return $this->earlyTurnDTO(
-                        $sessionId,
-                        $userMessage,
-                        "I'm having trouble completing your booking right now. Would you like to try again or speak with our staff?",
-                        $session,
-                        $intent,
-                        $entities
-                    );
-                }
-            }
-
+            
+            
             // Appointment Cancellation Logic
             if ($nextState === ConversationState::CANCEL_APPOINTMENT->value) {
                 $patientId = $session->patientId ?? null;
@@ -917,8 +637,13 @@ class ConversationOrchestrator
                 'intent' => $intent->intent
             ]);
 
-            // Step 7: Generate response
-            $response = $this->generateResponse($nextState, $intent, $entities, $session, $canProceed);
+            // Re-fetch session one more time to get the absolute latest state
+            $finalSession = $this->sessionManager->get($sessionId);
+            $finalState = $finalSession->conversationState;
+
+            // Step 7: Generate response using the latest state
+            $response = $this->generateResponse($finalState, $intent, $entities, $finalSession, $canProceed);
+            $nextState = $finalState; // Update nextState for the response
 
             Log::info('[DEBUG] Generated Response', [
                 'response' => $response,
@@ -1000,11 +725,17 @@ class ConversationOrchestrator
             return new IntentDTO($session->intent, 0.95, 'Flow continuation');
         }
 
-        // Parse intent from message
+        // Parse intent from message with comprehensive context
         return $this->intentParser->parseWithHistory(
             $userMessage,
             $session->conversationHistory,
-            ['state' => $session->conversationState]
+            [
+                'state' => $session->conversationState,
+                'conversation_state' => $session->conversationState,
+                'collected_data' => $session->collectedData,
+                'missing_entities' => $this->getMissingEntities($session->conversationState, $session->collectedData),
+                'current_focus' => $this->getCurrentStateFocus($session->conversationState)
+            ]
         );
     }
 
@@ -1018,9 +749,54 @@ class ConversationOrchestrator
             $session->conversationState,
             [
                 'collected_data' => $session->collectedData,
-                'conversation_state' => $session->conversationState
+                'conversation_state' => $session->conversationState,
+                'missing_entities' => $this->getMissingEntities($session->conversationState, $session->collectedData),
+                'current_focus' => $this->getCurrentStateFocus($session->conversationState),
+                'recent_history' => array_slice($session->conversationHistory, -2)
             ]
         );
+    }
+
+    /**
+     * Get missing entities for current state
+     */
+    private function getMissingEntities(string $state, array $collectedData): array
+    {
+        $required = $this->dialogueManager->getRequiredEntities($state);
+        $missing = [];
+
+        foreach ($required as $entity) {
+            // Special handling for doctor selection
+            if ($entity === 'doctor_id' && isset($collectedData['doctor_name'])) {
+                continue;
+            }
+            if ($entity === 'doctor_name' && isset($collectedData['doctor_id'])) {
+                continue;
+            }
+
+            if (!isset($collectedData[$entity]) || $collectedData[$entity] === null) {
+                $missing[] = $entity;
+            }
+        }
+
+        return $missing;
+    }
+
+    /**
+     * Get current state focus description
+     */
+    private function getCurrentStateFocus(string $state): string
+    {
+        return match($state) {
+            'SELECT_DATE' => 'Collecting appointment date',
+            'SELECT_SLOT' => 'Collecting appointment time',
+            'COLLECT_PATIENT_NAME' => 'Collecting patient name',
+            'COLLECT_PATIENT_DOB' => 'Collecting date of birth',
+            'COLLECT_PATIENT_PHONE' => 'Collecting phone number',
+            'SELECT_DOCTOR' => 'Selecting doctor or department',
+            'CONFIRM_BOOKING' => 'Confirming booking details',
+            default => 'General conversation',
+        };
     }
 
     /**
@@ -1275,6 +1051,130 @@ class ConversationOrchestrator
             'entities' => $entities->toArray(),
             'collected_data' => $session->collectedData,
         ]);
+    }
+
+    /**
+     * Execute booking appointment
+     */
+    private function executeBooking($session)
+    {
+        // Get or create patient ID
+        $patientId = $session->patientId;
+        if (!$patientId) {
+            // For demo/testing purposes, use a test patient ID
+            // In production, this should come from patient verification
+            $patientId = 1;
+        }
+
+        // Get doctor ID from collected data
+        $doctorId = $session->collectedData['doctor_id'] ?? $session->doctorId ?? null;
+        if (!$doctorId && isset($session->collectedData['doctor_name'])) {
+            // Look up doctor by name
+            $doctor = $this->doctorService->findByName($session->collectedData['doctor_name']);
+            if ($doctor) {
+                $doctorId = $doctor->id;
+            }
+        }
+
+        $date = $session->collectedData['date'];
+        $time = $session->collectedData['time'];
+        $slotId = $session->collectedData['slot_id'] ?? null;
+        $slotCount = $session->collectedData['slot_count'] ?? 1;
+        $appointmentStartTime = $session->collectedData['start_time'] ?? $time;
+
+        Log::info('[ConversationOrchestrator] Executing booking', [
+            'patient_id' => $patientId,
+            'doctor_id' => $doctorId,
+            'date' => $date,
+            'time' => $time,
+            'slot_id' => $slotId,
+            'slot_count' => $slotCount,
+            'start_time' => $appointmentStartTime
+        ]);
+
+        if (!$patientId || !$doctorId || !$date || !$time) {
+            throw new \Exception('Missing required booking information');
+        }
+
+        // Book the appointment
+        $appointment = $this->appointmentService->bookAppointment([
+            'patient_id' => $patientId,
+            'doctor_id' => $doctorId,
+            'date' => $date,
+            'start_time' => $appointmentStartTime,
+            'slot_id' => $slotId,
+            'slot_count' => $slotCount,
+            'type' => 'general',
+            'reason' => 'Patient booking via AI receptionist'
+        ]);
+
+        // Clean up by removing the large available_slots array after successful booking
+        if (isset($session->sessionId)) {
+            $this->sessionManager->removeCollectedData($session->sessionId, ['available_slots']);
+        }
+
+        return $appointment;
+    }
+
+    /**
+     * Create slot ranges for display
+     */
+    private function createSlotRangesForDisplay(array $slots): array
+    {
+        if (empty($slots)) {
+            return [];
+        }
+
+        // Sort slots by start time
+        usort($slots, function($a, $b) {
+            return strtotime($a['start_time']) - strtotime($b['start_time']);
+        });
+
+        $ranges = [];
+        $currentRange = null;
+
+        foreach ($slots as $slot) {
+            $time = date('h:i A', strtotime($slot['start_time']));
+
+            if ($currentRange === null) {
+                $currentRange = ['start' => $time, 'end' => $time];
+            } else {
+                // Check if this slot continues the current range (assuming 15-minute slots)
+                $currentTime = strtotime($slot['start_time']);
+                $previousTime = strtotime(end($slots)['start_time']); // This needs proper index tracking
+
+                // Simplified logic: just check consecutive slots
+                $prevSlotIndex = array_search($slot, $slots) - 1;
+                if ($prevSlotIndex >= 0) {
+                    $prevSlot = $slots[$prevSlotIndex];
+                    $prevTime = strtotime($prevSlot['start_time']);
+
+                    // If times are 15 minutes apart, continue the range
+                    if (($currentTime - $prevTime) === 900) { // 15 minutes = 900 seconds
+                        $currentRange['end'] = $time;
+                    } else {
+                        // Start new range
+                        $ranges[] = $currentRange;
+                        $currentRange = ['start' => $time, 'end' => $time];
+                    }
+                } else {
+                    $ranges[] = $currentRange;
+                    $currentRange = ['start' => $time, 'end' => $time];
+                }
+            }
+        }
+
+        // Add the last range
+        if ($currentRange) {
+            $ranges[] = $currentRange;
+        }
+
+        // Format ranges as strings
+        return array_map(function($range) {
+            return $range['start'] === $range['end']
+                ? $range['start']
+                : $range['start'] . ' - ' . $range['end'];
+        }, $ranges);
     }
 
     /**
