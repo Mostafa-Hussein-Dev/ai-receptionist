@@ -137,14 +137,20 @@ Available Intents:
 {$intents}
 
 Rules:
-1. Analyze the user's message carefully
-2. Consider the conversation context if provided
+1. Analyze the user's message carefully considering the conversation context/state
+2. Pay special attention to confirmation words (yes, yeah, yep, correct, right, ok, okay, sure) in states like CONFIRM_BOOKING or SELECT_SLOT - these should be CONFIRM intent
 3. Return your classification as JSON with this exact structure:
    {
      "intent": "INTENT_NAME",
      "confidence": 0.0-1.0,
      "reasoning": "brief explanation"
    }
+
+Context Guidelines:
+- In CONFIRM_BOOKING state: "yes", "yeah", "yep", "correct", "right" should be CONFIRM intent
+- In SELECT_SLOT state: "yes", "yeah", "yep" as confirmation should be CONFIRM intent
+- In general booking flow: "book", "schedule", "appointment" should be BOOK_APPOINTMENT intent
+- Single words like "yes" without clear context often indicate CONFIRM intent
 
 4. confidence should be 0.0 to 1.0 (e.g., 0.85 for 85% confident)
 5. Use UNKNOWN if you cannot determine the intent

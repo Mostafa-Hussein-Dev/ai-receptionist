@@ -147,6 +147,28 @@ class SessionManagerService implements SessionManagerServiceInterface
     }
 
     /**
+     * Remove specific keys from collected data
+     */
+    public function removeCollectedData(string $sessionId, array $keysToRemove): SessionDTO
+    {
+        $session = $this->get($sessionId);
+
+        if (!$session) {
+            throw new \Exception("Session not found: {$sessionId}");
+        }
+
+        $collectedData = $session->collectedData;
+
+        foreach ($keysToRemove as $key) {
+            unset($collectedData[$key]);
+        }
+
+        return $this->update($sessionId, [
+            'collected_data' => $collectedData,
+        ]);
+    }
+
+    /**
      * Update conversation state
      */
     public function updateState(string $sessionId, string $newState): SessionDTO

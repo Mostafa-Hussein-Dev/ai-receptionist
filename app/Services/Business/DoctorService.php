@@ -9,6 +9,7 @@ use App\Models\PostgreSQL\Department;
 use Carbon\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 class DoctorService
 {
@@ -329,17 +330,65 @@ class DoctorService
      */
     public function searchDoctors(string $query, bool $activeOnly = true): Collection
     {
-        $searchQuery = Doctor::where(function ($q) use ($query) {
+        // Remove "Dr." prefix and split into parts
+        $cleanQuery = preg_replace('/^dr\.?\s*/i', '', $query);
+        $cleanQuery = trim($cleanQuery);
+        $parts = preg_split('/\s+/', $cleanQuery);
+
+        Log::info('[DoctorService] Search doctors', [
+            'original_query' => $query,
+            'clean_query' => $cleanQuery,
+            'parts' => $parts,
+            'active_only' => $activeOnly
+        ]);
+
+        $searchQuery = Doctor::where(function ($q) use ($query, $cleanQuery, $parts) {
+            // Try original query (handles "Dr. Smith" if "Dr." is stored)
             $q->where('first_name', 'ILIKE', "%{$query}%")
                 ->orWhere('last_name', 'ILIKE', "%{$query}%")
                 ->orWhere('specialization', 'ILIKE', "%{$query}%");
+
+            // Also try cleaned query (handles "Smith" from "Dr. Smith")
+            if ($cleanQuery !== $query) {
+                $q->orWhere('first_name', 'ILIKE', "%{$cleanQuery}%")
+                    ->orWhere('last_name', 'ILIKE', "%{$cleanQuery}%")
+                    ->orWhere('specialization', 'ILIKE', "%{$cleanQuery}%");
+            }
+
+            // If multiple parts, try combinations
+            if (count($parts) >= 2) {
+                $q->orWhere(function ($subQ) use ($parts) {
+                    // First part matches first_name AND second part matches last_name
+                    $subQ->where('first_name', 'ILIKE', "%" . $parts[0] . "%")
+                          ->where('last_name', 'ILIKE', "%" . $parts[1] . "%");
+                })
+                ->orWhere(function ($subQ) use ($parts) {
+                    // First part matches last_name AND second part matches first_name
+                    $subQ->where('first_name', 'ILIKE', "%" . $parts[1] . "%")
+                          ->where('last_name', 'ILIKE', "%" . $parts[0] . "%");
+                });
+            }
         });
 
         if ($activeOnly) {
             $searchQuery->where('is_active', true);
         }
 
-        return $searchQuery->get();
+        $results = $searchQuery->get();
+
+        Log::info('[DoctorService] Search results', [
+            'results_count' => $results->count(),
+            'results' => $results->map(fn($d) => [
+                'id' => $d->id,
+                'first_name' => $d->first_name,
+                'last_name' => $d->last_name,
+                'specialization' => $d->specialization,
+                'is_active' => $d->is_active,
+                'department' => $d->department?->name
+            ])->toArray()
+        ]);
+
+        return $results;
     }
 
     /**
@@ -347,7 +396,26 @@ class DoctorService
      */
     public function getDoctorsByDepartmentName(string $departmentName, bool $activeOnly = true): Collection
     {
-        $department = Department::where('name', 'ILIKE', "%{$departmentName}%")->first();
+        // Clean the department name by removing common words
+        $cleanName = preg_replace('/\b(department|dept|division)\b/i', '', trim($departmentName));
+        $cleanName = preg_replace('/\s+/', ' ', $cleanName); // Clean up extra spaces
+
+        Log::info('[DoctorService] Department search', [
+            'original_name' => $departmentName,
+            'clean_name' => $cleanName
+        ]);
+
+        // Try exact match first
+        $department = Department::where('name', 'ILIKE', "%{$cleanName}%")->first();
+
+        // If not found, try the original name
+        if (!$department) {
+            $department = Department::where('name', 'ILIKE', "%{$departmentName}%")->first();
+        }
+
+        Log::info('[DoctorService] Department search result', [
+            'department_found' => $department ? $department->name : null
+        ]);
 
         if (!$department) {
             return collect([]);

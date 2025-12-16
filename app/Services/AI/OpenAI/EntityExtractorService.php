@@ -156,6 +156,27 @@ Rules:
 3. Format dates as YYYY-MM-DD
 4. Format times as HH:MM in 24-hour format
 5. Include country code for phone numbers (assume +961 if not specified)
+
+State-Specific Entity Extraction Rules:
+- GREETING: Extract NO entities
+- DETECT_INTENT: Extract ALL entities for initial routing
+- COLLECT_PATIENT_NAME: Extract ONLY patient_name
+- COLLECT_PATIENT_DOB: Extract ONLY date_of_birth
+- COLLECT_PATIENT_PHONE: Extract ONLY phone
+- VERIFY_PATIENT: Extract NO entities (patient already verified)
+- SELECT_DOCTOR: Extract ONLY doctor_name (can include or exclude "Dr.") and department
+- SELECT_DATE: Extract ONLY date
+- SHOW_AVAILABLE_SLOTS: Extract ONLY time (for slot selection)
+- SELECT_SLOT: Extract ONLY time
+- CONFIRM_BOOKING: Extract NO entities (confirmation phase)
+- EXECUTE_BOOKING: Extract NO entities (execution phase)
+- CLOSING: Extract NO entities
+- GENERAL_INQUIRY: Extract ALL relevant entities
+- CANCEL_APPOINTMENT: Extract ALL relevant entities for cancellation
+- RESCHEDULE_APPOINTMENT: Extract ALL relevant entities for rescheduling
+
+Critical Rule: NEVER extract patient information when in SELECT_DOCTOR state unless user explicitly indicates patient context
+Doctor Name Rule: In SELECT_DOCTOR state, any person names should be extracted as doctor_name (with or without "Dr." prefix)
 6. Return JSON with this exact structure:
    {
      "patient_name": "John Doe" or null,
@@ -180,10 +201,20 @@ PROMPT;
     {
         $prompt = "User Message: \"{$text}\"\n\n";
 
-        // Add conversation state if available (helps with context)
+        // Add comprehensive state context
         if (isset($context['conversation_state'])) {
-            $prompt .= "Conversation State: {$context['conversation_state']}\n";
-            $prompt .= "This helps you understand what information the user is likely providing.\n\n";
+            $prompt .= "CONVERSATION STATE: {$context['conversation_state']}\n";
+
+            // Add collected data context
+            if (isset($context['collected_data']) && !empty($context['collected_data'])) {
+                $prompt .= "ALREADY COLLECTED: " . json_encode($context['collected_data']) . "\n";
+            }
+
+            // Add what we're specifically looking for in this state
+            $prompt .= "CURRENT FOCUS: " . $this->getCurrentStateFocus($context['conversation_state']) . "\n";
+
+            // Add state-specific extraction guidance
+            $prompt .= "STATE-SPECIFIC RULES: " . $this->getStateSpecificRules($context['conversation_state']) . "\n\n";
         }
 
         // Add requested entities if specific extraction

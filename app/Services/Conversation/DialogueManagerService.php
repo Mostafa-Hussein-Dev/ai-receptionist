@@ -111,9 +111,19 @@ class DialogueManagerService implements DialogueManagerServiceInterface
 
             case ConversationState::SELECT_DOCTOR:
                 $collectedData = $context['collected_data'] ?? [];
-                if ($entities->has('doctor_name') || isset($collectedData['doctor_name'])) {
+                // Only proceed to SELECT_DATE if we have a validated doctor_id (set by ConversationOrchestrator)
+                $doctorId = $collectedData['doctor_id'] ?? null;
+                Log::info('[DialogueManager] SELECT_DOCTOR state check', [
+                    'doctor_id' => $doctorId,
+                    'doctor_name' => $collectedData['doctor_name'] ?? null,
+                    'collected_data_keys' => array_keys($collectedData)
+                ]);
+
+                if (isset($collectedData['doctor_id']) && !empty($collectedData['doctor_id'])) {
+                    Log::info('[DialogueManager] Proceeding to SELECT_DATE - doctor_id found', ['doctor_id' => $collectedData['doctor_id']]);
                     return ConversationState::SELECT_DATE->value;
                 }
+                Log::info('[DialogueManager] Staying in SELECT_DOCTOR - no doctor_id found');
                 return ConversationState::SELECT_DOCTOR->value;
 
             case ConversationState::SELECT_DATE:
@@ -134,7 +144,21 @@ class DialogueManagerService implements DialogueManagerServiceInterface
                 return ConversationState::SELECT_SLOT->value;
 
             case ConversationState::CONFIRM_BOOKING:
-                if ($intent->intent === IntentType::CONFIRM->value) {
+                // Check for explicit confirm intent OR common confirmation words
+                $userMessage = $context['user_message'] ?? '';
+                $confirmationWords = ['yes', 'yeah', 'yep', 'confirm', 'confirmed', 'okay', 'ok', 'sure', 'that\'s correct', 'correct', 'that works', 'sounds good', 'definitely'];
+
+                $isConfirmIntent = $intent->intent === IntentType::CONFIRM->value;
+                $hasConfirmWord = false;
+
+                foreach ($confirmationWords as $word) {
+                    if (stripos($userMessage, $word) !== false) {
+                        $hasConfirmWord = true;
+                        break;
+                    }
+                }
+
+                if ($isConfirmIntent || $hasConfirmWord) {
                     return ConversationState::EXECUTE_BOOKING->value;
                 }
                 return ConversationState::CONFIRM_BOOKING->value;
@@ -162,7 +186,7 @@ class DialogueManagerService implements DialogueManagerServiceInterface
             ConversationState::COLLECT_PATIENT_NAME => ['patient_name'],
             ConversationState::COLLECT_PATIENT_DOB => ['date_of_birth'],
             ConversationState::COLLECT_PATIENT_PHONE => ['phone'],
-            ConversationState::SELECT_DOCTOR => ['doctor_name'],
+            ConversationState::SELECT_DOCTOR => ['doctor_id', 'doctor_name'], // Accept either doctor_id or doctor_name
             ConversationState::SELECT_DATE => ['date'],
             ConversationState::SELECT_SLOT => ['time'],
             default => [],
@@ -177,6 +201,14 @@ class DialogueManagerService implements DialogueManagerServiceInterface
         $required = $this->getRequiredEntities($state);
 
         foreach ($required as $entity) {
+            // Special handling for doctor selection - accept either doctor_id OR doctor_name
+            if ($entity === 'doctor_id' && isset($collectedData['doctor_name'])) {
+                continue; // Skip doctor_id check if we have doctor_name
+            }
+            if ($entity === 'doctor_name' && isset($collectedData['doctor_id'])) {
+                continue; // Skip doctor_name check if we have doctor_id
+            }
+
             if (!isset($collectedData[$entity]) || $collectedData[$entity] === null) {
                 return false;
             }
@@ -212,6 +244,7 @@ class DialogueManagerService implements DialogueManagerServiceInterface
             'patient_name' => "May I have your full name please?",
             'date_of_birth' => "What's your date of birth?",
             'phone' => "What's the best phone number to reach you?",
+            'doctor_id' => "Which doctor would you like to see, or do you have a preference for a department?",
             'date' => "What date would you like for your appointment?",
             'time' => "What time works best for you?",
             default => "Could you please provide more information?",
@@ -317,9 +350,17 @@ class DialogueManagerService implements DialogueManagerServiceInterface
         $userPrompt = "Current State: {$state}\nContext: " . json_encode($context) . "\n\nGenerate appropriate response.";
 
         try {
-            return $this->llm->chat($systemPrompt, [
+            $response = $this->llm->chat($systemPrompt, [
                 ['role' => 'user', 'content' => $userPrompt],
             ]);
+
+            // If LLM returns empty response, fall back to template
+            if (empty(trim($response))) {
+                Log::warning('[DialogueManager] LLM returned empty response, using template', ['state' => $state]);
+                return $this->generateTemplateResponse($state, $context);
+            }
+
+            return $response;
         } catch (\Exception $e) {
             Log::error('[DialogueManager] LLM response generation failed', ['error' => $e->getMessage()]);
             return $this->generateTemplateResponse($state, $context);
@@ -331,14 +372,26 @@ class DialogueManagerService implements DialogueManagerServiceInterface
      */
     private function generateTemplateResponse(string $state, array $context): string
     {
+        // Check for patient correction scenario
+        if (isset($context['correction_detected']) && $context['correction_detected']) {
+            $correctionType = $context['correction_type'] ?? 'information';
+            return match($correctionType) {
+                'patient_name' => "Thank you for the correction. I've updated your name. Let me verify your information with the new details.",
+                'date_of_birth' => "Thank you for the correction. I've updated your date of birth. Let me verify your information with the new details.",
+                'phone' => "Thank you for the correction. I've updated your phone number. Let me verify your information with the new details.",
+                default => "Thank you for the correction. I've updated your information. Let me verify the details.",
+            };
+        }
+
         return match (ConversationState::from($state)) {
             ConversationState::GREETING => $this->getGreeting(),
             ConversationState::BOOK_APPOINTMENT => "I'd be happy to help you book an appointment. May I have your full name?",
             ConversationState::COLLECT_PATIENT_NAME => "May I have your full name please?",
             ConversationState::COLLECT_PATIENT_DOB => "What's your date of birth?",
             ConversationState::COLLECT_PATIENT_PHONE => "What's the best phone number to reach you?",
+            ConversationState::VERIFY_PATIENT => "Thank you. Which doctor would you like to see, or do you have a preference for a department?",
             ConversationState::SELECT_DOCTOR => "Which doctor would you like to see, or do you have a preference for a department?",
-            ConversationState::SELECT_DATE => "What date would you like for your appointment?",
+            ConversationState::SELECT_DATE => "What date would you like for your appointment? Please provide a specific date.",
             ConversationState::SHOW_AVAILABLE_SLOTS => "Let me check available times for you.",
             ConversationState::SELECT_SLOT => "What time works best for you?",
             ConversationState::CONFIRM_BOOKING => "Great! Let me confirm your appointment. Is this correct?",
@@ -399,6 +452,7 @@ Your goal is to guide the caller through the appointment process step-by-step.
 - **COLLECT_PATIENT_NAME**: Ask for the full name.
 - **COLLECT_PATIENT_DOB**: Ask for the date of birth (YYYY-MM-DD or natural language).
 - **COLLECT_PATIENT_PHONE**: Ask for the phone number.
+- **SELECT_DOCTOR**: Ask which doctor and/or Department they want to book the appointment with.
 - **SELECT_DATE**: Ask what date they prefer for the appointment.
 - **SHOW_AVAILABLE_SLOTS**: If available_slots are provided, summarize them briefly.
 - **SELECT_SLOT**: Ask which of the available times works best.
