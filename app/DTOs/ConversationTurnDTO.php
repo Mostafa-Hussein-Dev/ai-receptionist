@@ -19,7 +19,8 @@ class ConversationTurnDTO
         public readonly string $conversationState,
         public readonly float $processingTimeMs,
         public readonly ?\DateTime $timestamp = null,
-        public readonly ?array $metadata = null
+        public readonly ?array $metadata = null,
+        public readonly ?string $sessionId = null
     ) {}
 
     /**
@@ -42,7 +43,8 @@ class ConversationTurnDTO
             timestamp: isset($data['timestamp'])
                 ? new \DateTime($data['timestamp'])
                 : new \DateTime(),
-            metadata: $data['metadata'] ?? null
+            metadata: $data['metadata'] ?? null,
+            sessionId: $data['session_id'] ?? null
         );
     }
 
@@ -61,6 +63,7 @@ class ConversationTurnDTO
             'processing_time_ms' => $this->processingTimeMs,
             'timestamp' => $this->timestamp?->format('Y-m-d H:i:s'),
             'metadata' => $this->metadata,
+            'session_id' => $this->sessionId,
         ];
     }
 

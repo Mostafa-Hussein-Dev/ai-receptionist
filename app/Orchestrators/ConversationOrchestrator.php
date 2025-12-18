@@ -10,6 +10,7 @@ use App\Contracts\DialogueManagerServiceInterface;
 use App\DTOs\ConversationTurnDTO;
 use App\DTOs\IntentDTO;
 use App\DTOs\EntityDTO;
+use App\DTOs\StructuredAIResponseDTO;
 use App\Enums\ConversationState;
 use App\Enums\IntentType;
 use Illuminate\Support\Facades\Log;
@@ -118,10 +119,45 @@ class ConversationOrchestrator
             // Step 3: Extract entities
             $entities = $this->extractEntities($userMessage, $session);
 
-            // Step 4: Update collected data (only save entities relevant to current state)
+            // Step 4: Update collected data with enhanced doctor verification
             if ($entities->count() > 0) {
                 $relevantEntities = $this->filterEntitiesForState($entities, $session->conversationState);
                 $newData = array_filter($relevantEntities, fn($value) => $value !== null);
+
+                // Enhanced doctor verification for any doctor_name detected
+                if (isset($newData['doctor_name']) && !isset($session->collectedData['doctor_id'])) {
+                    $doctorVerification = $this->verifyAndStoreDoctor($sessionId, $newData['doctor_name']);
+                    if ($doctorVerification['verified']) {
+                        // Replace doctor_name with verified details
+                        unset($newData['doctor_name']); // Remove unverified name
+                        $newData = array_merge($newData, $doctorVerification['doctor_data']);
+                        Log::info('[ConversationOrchestrator] Doctor verified during entity extraction', [
+                            'original_name' => $newData['doctor_name'] ?? 'unknown',
+                            'verified_data' => $doctorVerification['doctor_data']
+                        ]);
+                    } else {
+                        // Keep original name but log verification failure
+                        Log::warning('[ConversationOrchestrator] Doctor verification failed', [
+                            'doctor_name' => $newData['doctor_name'],
+                            'reason' => $doctorVerification['reason'] ?? 'Unknown'
+                        ]);
+                    }
+                }
+
+                // Enhanced patient verification when we have enough patient information
+                if (!isset($session->collectedData['patient_id'])) {
+                    $patientData = $this->shouldVerifyPatient($newData, $session->collectedData);
+                    if ($patientData['should_verify']) {
+                        $patientVerification = $this->verifyAndStorePatient($sessionId, $patientData['info']);
+                        if ($patientVerification['verified']) {
+                            Log::info('[ConversationOrchestrator] Patient verified during entity extraction', [
+                                'patient_id' => $patientVerification['patient_id'],
+                                'patient_name' => $patientData['info']['full_name']
+                            ]);
+                        }
+                    }
+                }
+
                 if (!empty($newData)) {
                     $this->sessionManager->updateCollectedData($sessionId, $newData);
                 }
@@ -245,56 +281,7 @@ class ConversationOrchestrator
 
             // Available Slots Display Logic
             if ($nextState === ConversationState::SHOW_AVAILABLE_SLOTS->value) {
-                $doctorId = $session->collectedData['doctor_id'] ?? null;
-                $date = $session->collectedData['date'] ?? null;
-
-                if ($doctorId && $date) {
-                    try {
-                        Log::info('[ConversationOrchestrator] Fetching available slots for display', [
-                            'doctor_id' => $doctorId,
-                            'date' => $date
-                        ]);
-
-                        $slots = $this->slotService->getAvailableSlots($doctorId, new \Carbon\Carbon($date));
-
-                        if ($slots->isNotEmpty()) {
-                            // Format slots for display
-                            $formattedSlots = $slots->map(fn($s) => date('h:i A', strtotime($s->start_time)))->toArray();
-
-                            // Create slot ranges
-                            $slotRanges = $this->createSlotRangesForDisplay($slots->toArray());
-
-                            // Store in session for LLM access
-                            $this->sessionManager->updateCollectedData($sessionId, [
-                                'available_slots' => $formattedSlots,
-                                'slot_ranges' => $slotRanges,
-                                'slots_count' => $slots->count()
-                            ]);
-
-                            Log::info('[ConversationOrchestrator] Available slots stored for display', [
-                                'count' => $slots->count(),
-                                'slot_ranges' => $slotRanges,
-                                'sample_slots' => array_slice($formattedSlots, 0, 3)
-                            ]);
-                        } else {
-                            $this->sessionManager->updateCollectedData($sessionId, [
-                                'available_slots' => [],
-                                'no_slots_available' => true
-                            ]);
-
-                            Log::info('[ConversationOrchestrator] No available slots found', [
-                                'doctor_id' => $doctorId,
-                                'date' => $date
-                            ]);
-                        }
-                    } catch (\Exception $e) {
-                        Log::error('[ConversationOrchestrator] Failed to fetch slots', [
-                            'doctor_id' => $doctorId,
-                            'date' => $date,
-                            'error' => $e->getMessage()
-                        ]);
-                    }
-                }
+                $this->fetchAndStoreAvailableSlots($sessionId, $session->collectedData);
             }
 
             //Doctor Selection Logic (process entities BEFORE auto-advance check)
@@ -426,8 +413,12 @@ class ConversationOrchestrator
                         $result = $this->patientService->verifyIdentity($phone, $first, $last);
 
                         if ($result['verified']) {
-                            // Store patient_id in session
+                            // Store patient_id in both session metadata and collected data
                             $this->sessionManager->update($sessionId, [
+                                'patient_id' => $result['patient']->id,
+                            ]);
+
+                            $this->sessionManager->updateCollectedData($sessionId, [
                                 'patient_id' => $result['patient']->id,
                             ]);
 
@@ -462,7 +453,12 @@ class ConversationOrchestrator
                                 'phone' => $phone,
                             ]);
 
+                            // Store patient_id in both session metadata and collected data
                             $this->sessionManager->update($sessionId, [
+                                'patient_id' => $new->id,
+                            ]);
+
+                            $this->sessionManager->updateCollectedData($sessionId, [
                                 'patient_id' => $new->id,
                             ]);
                         }
@@ -674,7 +670,8 @@ class ConversationOrchestrator
                 entities: $entities,
                 conversationState: $nextState,
                 processingTimeMs: (int)$processingTime,
-                timestamp: now()
+                timestamp: now(),
+                sessionId: $sessionId
             );
 
             Log::info('[ConversationOrchestrator] Turn processed', [
@@ -706,13 +703,375 @@ class ConversationOrchestrator
                 entities: EntityDTO::fromArray([]),
                 conversationState: $session->conversationState ?? ConversationState::DETECT_INTENT->value,
                 processingTimeMs: (int)$processingTime,
-                timestamp: now()
+                timestamp: now(),
+                sessionId: $sessionId
             );
         }
     }
 
     /**
-     * Parse intent
+     * Enhanced processTurn with contextual NLU and structured AI responses
+     * Integrates new AI service improvements while maintaining backward compatibility
+     */
+    public function processTurnEnhanced(string $sessionId, string $userMessage): ConversationTurnDTO
+    {
+        $startTime = microtime(true);
+
+        try {
+            // Step 1: Get session
+            $session = $this->sessionManager->get($sessionId);
+            if (!$session) {
+                throw new \RuntimeException("Session not found: {$sessionId}");
+            }
+
+            $turnNumber = $session->turnCount + 1;
+
+            Log::info('[ConversationOrchestrator] Processing enhanced turn', [
+                'session' => $sessionId,
+                'turn' => $turnNumber,
+                'state' => $session->conversationState,
+            ]);
+
+            // Step 2: Build context for AI services
+            $context = $this->buildAIContext($session, $userMessage, $turnNumber);
+
+            // Step 3: Enhanced intent parsing with context
+            $intentResponse = $this->parseIntentWithContext($userMessage, $context);
+
+            // Step 4: Enhanced entity extraction with context
+            $entityResponse = $this->extractEntitiesWithContext($userMessage, $context);
+
+            // Step 5: Process structured AI responses through dialogue manager
+            $dialogueResult = $this->dialogueManager->processStructuredResponse(
+                $session,
+                $this->chooseBestAIResponse($intentResponse, $entityResponse),
+                array_merge($context, [
+                    'intent_response' => $intentResponse,
+                    'entity_response' => $entityResponse
+                ])
+            );
+
+            // Step 6: Handle business logic based on dialogue result
+            $businessResult = $this->processBusinessLogic(
+                $session,
+                $dialogueResult,
+                $intentResponse,
+                $entityResponse,
+                $context
+            );
+
+            // Step 7: Update session based on results
+            $this->updateSessionFromResults($sessionId, $dialogueResult, $businessResult);
+
+            // Step 8: Generate final response
+            $finalResponse = $this->generateFinalResponse($dialogueResult, $businessResult, $context);
+
+            // Step 9: Create and return DTO
+            $processingTime = (microtime(true) - $startTime) * 1000;
+
+            return new ConversationTurnDTO(
+                turnNumber: $turnNumber,
+                userMessage: $userMessage,
+                systemResponse: $finalResponse,
+                intent: new IntentDTO(
+                    intent: $intentResponse->slots['intent'] ?? 'UNKNOWN',
+                    confidence: $intentResponse->confidence,
+                    reasoning: $intentResponse->reasoning
+                ),
+                entities: EntityDTO::fromArray($entityResponse->slots),
+                conversationState: $dialogueResult['state'] ?? $session->conversationState,
+                processingTimeMs: round($processingTime, 2),
+                timestamp: now(),
+                metadata: array_merge(
+                    $dialogueResult['metadata'] ?? [],
+                    $businessResult['metadata'] ?? [],
+                    [
+                        'enhanced_processing' => true,
+                        'intent_confidence' => $intentResponse->confidence,
+                        'entity_confidence' => $entityResponse->confidence,
+                        'task_switch_detected' => $intentResponse->task_switch_detected,
+                        'clarification_requested' => $intentResponse->requires_clarification || $entityResponse->requires_clarification,
+                        'auto_advance' => $dialogueResult['auto_advance'] ?? false
+                    ]
+                ),
+                sessionId: $sessionId
+            );
+
+        } catch (\Exception $e) {
+            Log::error('[ConversationOrchestrator] Enhanced processing failed', [
+                'session_id' => $sessionId,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+
+            // Analyze error type to provide specific user feedback
+            $userMessage = $this->analyzeErrorAndProvideUserFeedback($e, $userMessage);
+
+            // Fallback to original processTurn for reliability
+            Log::info('[ConversationOrchestrator] Falling back to original processing');
+
+            try {
+                return $this->processTurn($sessionId, $userMessage);
+            } catch (\Exception $fallbackException) {
+                // If fallback also fails, return a basic error response
+                Log::error('[ConversationOrchestrator] Fallback processing also failed', [
+                    'session_id' => $sessionId,
+                    'fallback_error' => $fallbackException->getMessage()
+                ]);
+
+                return $this->createBasicErrorResponse($sessionId, $userMessage, $e);
+            }
+        }
+    }
+
+    /**
+     * Build comprehensive context for AI services
+     */
+    private function buildAIContext($session, string $userMessage, int $turnNumber): array
+    {
+        // Get conversation history
+        $history = $this->sessionManager->getConversationHistory($session->sessionId, 5);
+
+        // Determine previous intent from session or history
+        $previousIntent = $this->extractPreviousIntent($session, $history);
+
+        return [
+            'conversation_state' => $session->conversationState,
+            'collected_data' => $session->collectedData,
+            'conversation_history' => $history,
+            'turn_number' => $turnNumber,
+            'previous_intent' => $previousIntent,
+            'patient_id' => $session->patientId,
+            'message_length' => strlen($userMessage),
+            'current_time' => now()->toISOString(),
+            'hospital_context' => $this->getHospitalContext()
+        ];
+    }
+
+    /**
+     * Enhanced intent parsing with context
+     */
+    private function parseIntentWithContext(string $userMessage, array $context): StructuredAIResponseDTO
+    {
+        // Use enhanced parsing if available
+        if (method_exists($this->intentParser, 'parseWithContext')) {
+            return $this->intentParser->parseWithContext($userMessage, $context);
+        }
+
+        // Fallback to legacy parsing and convert to structured response
+        $legacyIntent = $this->intentParser->parseWithHistory(
+            $userMessage,
+            $context['conversation_history'] ?? [],
+            $context
+        );
+
+        return StructuredAIResponseDTO::success(
+            nextAction: 'CONTINUE',
+            responseText: 'Intent understood',
+            confidence: $legacyIntent->confidence,
+            reasoning: $legacyIntent->reasoning,
+            slots: ['intent' => $legacyIntent->intent]
+        );
+    }
+
+    /**
+     * Enhanced entity extraction with context
+     */
+    private function extractEntitiesWithContext(string $userMessage, array $context): StructuredAIResponseDTO
+    {
+        // Use enhanced extraction if available
+        if (method_exists($this->entityExtractor, 'extractWithContext')) {
+            return $this->entityExtractor->extractWithContext($userMessage, $context);
+        }
+
+        // Fallback to legacy extraction and convert to structured response
+        $legacyEntities = $this->entityExtractor->extractWithState(
+            $userMessage,
+            $context['conversation_state'] ?? '',
+            $context
+        );
+
+        return StructuredAIResponseDTO::success(
+            nextAction: 'ENTITIES_EXTRACTED',
+            responseText: 'Information extracted',
+            confidence: 0.8, // Default confidence for legacy extraction
+            slots: $legacyEntities->toArray()
+        );
+    }
+
+    /**
+     * Choose the best AI response when both intent and entity parsing provide results
+     */
+    private function chooseBestAIResponse(StructuredAIResponseDTO $intentResponse, StructuredAIResponseDTO $entityResponse): StructuredAIResponseDTO
+    {
+        // Prioritize responses that require clarification or indicate task switching
+        if ($intentResponse->requires_clarification || $intentResponse->task_switch_detected) {
+            return $intentResponse;
+        }
+
+        if ($entityResponse->requires_clarification || $entityResponse->task_switch_detected) {
+            return $entityResponse;
+        }
+
+        // Choose response with higher confidence
+        if ($intentResponse->confidence >= $entityResponse->confidence) {
+            return StructuredAIResponseDTO::success(
+                nextAction: $intentResponse->next_action,
+                responseText: $intentResponse->response_text,
+                updatedState: $intentResponse->updated_state,
+                slots: array_merge($intentResponse->slots, $entityResponse->slots),
+                confidence: $intentResponse->confidence,
+                reasoning: $intentResponse->reasoning
+            );
+        } else {
+            return StructuredAIResponseDTO::success(
+                nextAction: $entityResponse->next_action,
+                responseText: $entityResponse->response_text,
+                updatedState: $entityResponse->updated_state,
+                slots: array_merge($intentResponse->slots, $entityResponse->slots),
+                confidence: $entityResponse->confidence,
+                reasoning: $entityResponse->reasoning
+            );
+        }
+    }
+
+    /**
+     * Process business logic based on AI responses
+     */
+    private function processBusinessLogic(
+        $session,
+        array $dialogueResult,
+        StructuredAIResponseDTO $intentResponse,
+        StructuredAIResponseDTO $entityResponse,
+        array $context
+    ): array {
+        $result = [
+            'business_logic_applied' => false,
+            'business_data' => [],
+            'metadata' => []
+        ];
+
+        // Handle task switching data preservation
+        if (isset($dialogueResult['preserved_data'])) {
+            $result['business_data']['preserved_data'] = $dialogueResult['preserved_data'];
+            $result['metadata']['data_preservation_applied'] = true;
+        }
+
+        // Apply auto-advance logic if enabled
+        if ($dialogueResult['auto_advance'] ?? false) {
+            $result['business_data']['auto_advance'] = true;
+            $result['metadata']['auto_advance_applied'] = true;
+        }
+
+        // Extract and store entities if available
+        if (!empty($entityResponse->slots)) {
+            // Handle both array and EntityDTO formats
+            $entityDTO = $entityResponse->slots instanceof EntityDTO
+                ? $entityResponse->slots
+                : EntityDTO::fromArray($entityResponse->slots);
+
+            $relevantEntities = $this->filterEntitiesForState(
+                $entityDTO,
+                $session->conversationState
+            );
+
+            // filterEntitiesForState already returns an array, so no need to call toArray()
+            $filteredData = array_filter($relevantEntities, fn($v) => $v !== null);
+            if (!empty($filteredData)) {
+                $result['business_data']['extracted_entities'] = $filteredData;
+                $result['metadata']['entities_extracted'] = true;
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * Update session based on processing results
+     */
+    private function updateSessionFromResults(string $sessionId, array $dialogueResult, array $businessResult): void
+    {
+        $updates = [];
+
+        // Update state if changed
+        if (isset($dialogueResult['state']) && $dialogueResult['state'] !== null) {
+            $updates['conversation_state'] = $dialogueResult['state'];
+        }
+
+        // Update collected data
+        if (isset($businessResult['business_data']['extracted_entities'])) {
+            $updates['collected_data'] = $businessResult['business_data']['extracted_entities'];
+        }
+
+        // Restore preserved data if task switching occurred
+        if (isset($businessResult['business_data']['preserved_data'])) {
+            $updates['collected_data'] = array_merge(
+                $updates['collected_data'] ?? [],
+                $businessResult['business_data']['preserved_data']
+            );
+        }
+
+        // Apply updates if any
+        if (!empty($updates)) {
+            $this->sessionManager->update($sessionId, $updates);
+        }
+    }
+
+    /**
+     * Generate final response considering all processing results
+     */
+    private function generateFinalResponse(array $dialogueResult, array $businessResult, array $context): string
+    {
+        // Use dialogue manager response as primary
+        $response = $dialogueResult['response'] ?? 'How can I help you?';
+
+        // Add context-aware enhancements
+        if ($businessResult['metadata']['data_preservation_applied'] ?? false) {
+            $response .= ' I\'ve saved your information for the new request.';
+        }
+
+        if ($businessResult['metadata']['auto_advance_applied'] ?? false) {
+            $response .= ' Let me continue with the next step.';
+        }
+
+        return $response;
+    }
+
+    /**
+     * Extract previous intent from session or conversation history
+     */
+    private function extractPreviousIntent($session, array $history): ?string
+    {
+        // Try to get from session metadata first
+        if (isset($session->collectedData['last_intent'])) {
+            return $session->collectedData['last_intent'];
+        }
+
+        // Extract from conversation history
+        foreach (array_reverse($history) as $turn) {
+            if (isset($turn['metadata']['intent'])) {
+                return $turn['metadata']['intent'];
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Get hospital context for AI processing
+     */
+    private function getHospitalContext(): array
+    {
+        return [
+            'hospital_name' => config('hospital.name', 'Our Hospital'),
+            'timezone' => config('app.timezone', 'UTC'),
+            'operating_hours' => config('hospital.operating_hours', []),
+            'appointment_rules' => config('hospital.appointment_rules', [])
+        ];
+    }
+
+    /**
+     * Parse intent (legacy method)
      */
     private function parseIntent(string $userMessage, $session): IntentDTO
     {
@@ -1096,6 +1455,9 @@ class ConversationOrchestrator
             throw new \Exception('Missing required booking information');
         }
 
+        // Validate slot availability before booking
+        $this->validateSlotAvailability($doctorId, $date, $time);
+
         // Book the appointment
         $appointment = $this->appointmentService->bookAppointment([
             'patient_id' => $patientId,
@@ -1195,6 +1557,437 @@ class ConversationOrchestrator
         return in_array($state, $flowStates);
     }
 
+    /**
+     * Validate slot availability before booking
+     */
+    private function validateSlotAvailability(int $doctorId, string $date, string $time): void
+    {
+        try {
+            Log::info('[ConversationOrchestrator] Validating slot availability', [
+                'doctor_id' => $doctorId,
+                'date' => $date,
+                'time' => $time
+            ]);
+
+            // Get available slots for the doctor and date
+            $availableSlots = $this->slotService->getAvailableSlots($doctorId, new \Carbon\Carbon($date));
+
+            // Check if the requested time is in the available slots
+            $requestedTime = \Carbon\Carbon::parse("{$date} {$time}:00");
+            $isAvailable = $availableSlots->contains(function ($slot) use ($requestedTime) {
+                $slotStartTime = \Carbon\Carbon::parse($slot->start_time);
+                $slotEndTime = \Carbon\Carbon::parse($slot->end_time);
+
+                // Check if requested time is within the slot (with some tolerance)
+                return $requestedTime->greaterThanOrEqualTo($slotStartTime->subMinutes(5)) &&
+                       $requestedTime->lessThanOrEqualTo($slotEndTime->addMinutes(5));
+            });
+
+            if (!$isAvailable) {
+                Log::warning('[ConversationOrchestrator] Slot not available', [
+                    'doctor_id' => $doctorId,
+                    'date' => $date,
+                    'time' => $time,
+                    'available_slots_count' => $availableSlots->count(),
+                    'available_slots' => $availableSlots->map(fn($s) => $s->start_time)->toArray()
+                ]);
+
+                throw new \Exception("The time slot {$time} on {$date} is no longer available. Please select a different time.");
+            }
+
+            Log::info('[ConversationOrchestrator] Slot validation successful', [
+                'doctor_id' => $doctorId,
+                'date' => $date,
+                'time' => $time
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('[ConversationOrchestrator] Slot validation failed', [
+                'doctor_id' => $doctorId,
+                'date' => $date,
+                'time' => $time,
+                'error' => $e->getMessage()
+            ]);
+
+            // Re-throw the exception with more context
+            throw new \Exception("Slot validation failed: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * Check if we should verify patient information
+     */
+    private function shouldVerifyPatient(array $newData, array $existingData): array
+    {
+        // Combine new and existing data for checking
+        $allData = array_merge($existingData, $newData);
+
+        // Check if we have enough patient information for verification
+        $hasName = !empty($allData['patient_name']);
+        $hasPhone = !empty($allData['phone']);
+        $hasDOB = !empty($allData['date_of_birth']);
+
+        // We need at least name + phone OR name + phone + dob for verification
+        $shouldVerify = $hasName && $hasPhone && strlen($allData['phone']) >= 7;
+
+        if ($shouldVerify) {
+            // Parse patient name into first and last name
+            $nameParts = explode(' ', trim($allData['patient_name']), 2);
+            $firstName = $nameParts[0] ?? '';
+            $lastName = $nameParts[1] ?? '';
+
+            return [
+                'should_verify' => true,
+                'info' => [
+                    'full_name' => $allData['patient_name'],
+                    'first_name' => $firstName,
+                    'last_name' => $lastName,
+                    'phone' => $allData['phone'],
+                    'date_of_birth' => $allData['date_of_birth'] ?? null
+                ]
+            ];
+        }
+
+        return ['should_verify' => false];
+    }
+
+    /**
+     * Verify patient and store patient information
+     */
+    private function verifyAndStorePatient(string $sessionId, array $patientInfo): array
+    {
+        try {
+            Log::info('[ConversationOrchestrator] Verifying patient', [
+                'full_name' => $patientInfo['full_name'],
+                'phone' => $patientInfo['phone'],
+                'has_dob' => !empty($patientInfo['date_of_birth'])
+            ]);
+
+            // Try verifying identity
+            $result = $this->patientService->verifyIdentity(
+                $patientInfo['phone'],
+                $patientInfo['first_name'],
+                $patientInfo['last_name']
+            );
+
+            if ($result['verified']) {
+                // Store patient_id in both session metadata and collected data
+                $this->sessionManager->update($sessionId, [
+                    'patient_id' => $result['patient']->id,
+                ]);
+
+                $this->sessionManager->updateCollectedData($sessionId, [
+                    'patient_id' => $result['patient']->id,
+                ]);
+
+                Log::info('[ConversationOrchestrator] Patient verification successful', [
+                    'patient_id' => $result['patient']->id,
+                    'patient_name' => $result['patient']->first_name . ' ' . $result['patient']->last_name,
+                    'phone_verified' => $patientInfo['phone']
+                ]);
+
+                return [
+                    'verified' => true,
+                    'patient_id' => $result['patient']->id,
+                    'message' => 'Patient verified successfully'
+                ];
+            } else {
+                // Create new patient automatically if we have enough information
+                if (!empty($patientInfo['date_of_birth'])) {
+                    try {
+                        $newPatient = $this->patientService->createPatient([
+                            'first_name' => $patientInfo['first_name'],
+                            'last_name' => $patientInfo['last_name'],
+                            'date_of_birth' => $patientInfo['date_of_birth'],
+                            'phone' => $patientInfo['phone'],
+                        ]);
+
+                        // Store patient_id in both session metadata and collected data
+                        $this->sessionManager->update($sessionId, [
+                            'patient_id' => $newPatient->id,
+                        ]);
+
+                        $this->sessionManager->updateCollectedData($sessionId, [
+                            'patient_id' => $newPatient->id,
+                        ]);
+
+                        Log::info('[ConversationOrchestrator] New patient created', [
+                            'patient_id' => $newPatient->id,
+                            'patient_name' => $newPatient->first_name . ' ' . $newPatient->last_name,
+                            'phone' => $patientInfo['phone']
+                        ]);
+
+                        return [
+                            'verified' => true,
+                            'patient_id' => $newPatient->id,
+                            'new_patient' => true,
+                            'message' => 'New patient created and verified'
+                        ];
+                    } catch (\Exception $e) {
+                        Log::error('[ConversationOrchestrator] Patient creation failed', [
+                            'patient_info' => $patientInfo,
+                            'error' => $e->getMessage()
+                        ]);
+                    }
+                }
+
+                Log::info('[ConversationOrchestrator] Patient verification failed - insufficient data for creation', [
+                    'patient_info' => $patientInfo
+                ]);
+
+                return [
+                    'verified' => false,
+                    'reason' => 'Patient not found and insufficient data for creation',
+                    'message' => 'Patient verification pending'
+                ];
+            }
+
+        } catch (\Exception $e) {
+            Log::error('[ConversationOrchestrator] Patient verification failed', [
+                'patient_info' => $patientInfo,
+                'error' => $e->getMessage()
+            ]);
+
+            return [
+                'verified' => false,
+                'reason' => 'Verification error: ' . $e->getMessage(),
+                'message' => 'Unable to verify patient at this time'
+            ];
+        }
+    }
+
+    /**
+     * Verify doctor and store doctor information
+     */
+    private function verifyAndStoreDoctor(string $sessionId, string $doctorName): array
+    {
+        try {
+            Log::info('[ConversationOrchestrator] Verifying doctor', [
+                'doctor_name' => $doctorName
+            ]);
+
+            // Search for doctors by name
+            $doctors = $this->doctorService->searchDoctors($doctorName);
+
+            if ($doctors->count() === 1) {
+                // Exact match found
+                $doctor = $doctors->first();
+
+                $doctorData = [
+                    'doctor_id' => $doctor->id,
+                    'doctor_name' => "Dr. {$doctor->first_name} {$doctor->last_name}",
+                    'department' => $doctor->department->name ?? null
+                ];
+
+                // Store verified doctor data
+                $this->sessionManager->updateCollectedData($sessionId, $doctorData);
+
+                return [
+                    'verified' => true,
+                    'doctor_data' => $doctorData,
+                    'message' => "Doctor verified: {$doctorData['doctor_name']}"
+                ];
+            } elseif ($doctors->count() > 1) {
+                // Multiple matches - return options
+                $options = $doctors->map(fn($d) => [
+                    'id' => $d->id,
+                    'name' => "Dr. {$d->first_name} {$d->last_name}",
+                    'department' => $d->department->name ?? 'General Practice'
+                ])->toArray();
+
+                return [
+                    'verified' => false,
+                    'reason' => 'Multiple matches found',
+                    'options' => $options,
+                    'message' => 'Multiple doctors found with that name'
+                ];
+            } else {
+                // No matches found
+                return [
+                    'verified' => false,
+                    'reason' => 'No doctor found',
+                    'message' => 'No doctor found with that name'
+                ];
+            }
+
+        } catch (\Exception $e) {
+            Log::error('[ConversationOrchestrator] Doctor verification failed', [
+                'doctor_name' => $doctorName,
+                'error' => $e->getMessage()
+            ]);
+
+            return [
+                'verified' => false,
+                'reason' => 'Verification error: ' . $e->getMessage(),
+                'message' => 'Unable to verify doctor at this time'
+            ];
+        }
+    }
+
+    /**
+     * Fetch and store available slots for display
+     */
+    private function fetchAndStoreAvailableSlots(string $sessionId, array $collectedData): void
+    {
+        $doctorId = $collectedData['doctor_id'] ?? null;
+        $doctorName = $collectedData['doctor_name'] ?? null;
+        $date = $collectedData['date'] ?? null;
+
+        // If we don't have doctor_id but have doctor_name, try to find the doctor first
+        if (!$doctorId && $doctorName) {
+            try {
+                $doctors = $this->doctorService->searchDoctors($doctorName);
+                if ($doctors->count() === 1) {
+                    $doctorId = $doctors->first()->id;
+                    Log::info('[ConversationOrchestrator] Resolved doctor from name', [
+                        'doctor_name' => $doctorName,
+                        'doctor_id' => $doctorId
+                    ]);
+                }
+            } catch (\Exception $e) {
+                Log::warning('[ConversationOrchestrator] Failed to resolve doctor from name', [
+                    'doctor_name' => $doctorName,
+                    'error' => $e->getMessage()
+                ]);
+            }
+        }
+
+        if ($doctorId && $date) {
+            try {
+                Log::info('[ConversationOrchestrator] Fetching available slots for display', [
+                    'doctor_id' => $doctorId,
+                    'date' => $date,
+                    'doctor_name' => $doctorName
+                ]);
+
+                $slots = $this->slotService->getAvailableSlots($doctorId, new \Carbon\Carbon($date));
+
+                if ($slots->isNotEmpty()) {
+                    // Format slots for display
+                    $formattedSlots = $slots->map(fn($s) => date('h:i A', strtotime($s->start_time)))->toArray();
+
+                    // Create slot ranges for better readability
+                    $slotRanges = $this->createSlotRangesForDisplay($slots->toArray());
+
+                    // Store comprehensive slot information in session
+                    $this->sessionManager->updateCollectedData($sessionId, [
+                        'available_slots' => $formattedSlots,
+                        'slot_ranges' => $slotRanges,
+                        'slots_count' => $slots->count(),
+                        'slots_fetched_at' => now()->toISOString()
+                    ]);
+
+                    Log::info('[ConversationOrchestrator] Available slots stored for display', [
+                        'doctor_id' => $doctorId,
+                        'date' => $date,
+                        'count' => $slots->count(),
+                        'slot_ranges' => $slotRanges,
+                        'sample_slots' => array_slice($formattedSlots, 0, 3)
+                    ]);
+                } else {
+                    // Store empty slots information
+                    $this->sessionManager->updateCollectedData($sessionId, [
+                        'available_slots' => [],
+                        'slot_ranges' => [],
+                        'slots_count' => 0,
+                        'no_slots_available' => true,
+                        'slots_fetched_at' => now()->toISOString()
+                    ]);
+
+                    Log::info('[ConversationOrchestrator] No available slots found', [
+                        'doctor_id' => $doctorId,
+                        'date' => $date
+                    ]);
+                }
+            } catch (\Exception $e) {
+                Log::error('[ConversationOrchestrator] Failed to fetch slots', [
+                    'doctor_id' => $doctorId,
+                    'date' => $date,
+                    'error' => $e->getMessage()
+                ]);
+
+                // Store error information
+                $this->sessionManager->updateCollectedData($sessionId, [
+                    'slots_error' => true,
+                    'slots_error_message' => 'Unable to fetch available slots at this time'
+                ]);
+            }
+        } else {
+            Log::warning('[ConversationOrchestrator] Missing required data for slot fetching', [
+                'doctor_id' => $doctorId,
+                'doctor_name' => $doctorName,
+                'date' => $date
+            ]);
+        }
+    }
+
+    /**
+     * Analyze error and provide specific user feedback
+     */
+    private function analyzeErrorAndProvideUserFeedback(\Exception $e, string $originalMessage): string
+    {
+        $errorMessage = strtolower($e->getMessage());
+
+        // Check for common error patterns and provide helpful feedback
+        if (strpos($errorMessage, 'timeout') !== false || strpos($errorMessage, 'connection') !== false) {
+            Log::info('[ConversationOrchestrator] Detected timeout/connection error', [
+                'error_pattern' => 'timeout/connection'
+            ]);
+            return "I'm experiencing a temporary slowdown. Could you please try again in a moment?";
+        }
+
+        if (strpos($errorMessage, 'api') !== false || strpos($errorMessage, 'rate limit') !== false) {
+            Log::info('[ConversationOrchestrator] Detected API/rate limit error', [
+                'error_pattern' => 'api/rate_limit'
+            ]);
+            return "I'm getting too many requests right now. Could you please rephrase that?";
+        }
+
+        if (strpos($errorMessage, 'json') !== false || strpos($errorMessage, 'decode') !== false) {
+            Log::info('[ConversationOrchestrator] Detected JSON parsing error', [
+                'error_pattern' => 'json/parsing'
+            ]);
+            return "I had trouble understanding that. Could you try saying it differently?";
+        }
+
+        if (strpos($errorMessage, 'validation') !== false || strpos($errorMessage, 'invalid') !== false) {
+            Log::info('[ConversationOrchestrator] Detected validation error', [
+                'error_pattern' => 'validation'
+            ]);
+            return "I need some clarification. Could you provide more details?";
+        }
+
+        // Default fallback
+        Log::info('[ConversationOrchestrator] Using generic error response', [
+            'error_type' => 'unknown'
+        ]);
+        return $originalMessage; // Return original message for fallback processing
+    }
+
+    /**
+     * Create basic error response when all processing fails
+     */
+    private function createBasicErrorResponse(string $sessionId, string $userMessage, \Exception $originalError): ConversationTurnDTO
+    {
+        Log::error('[ConversationOrchestrator] All processing methods failed', [
+            'session_id' => $sessionId,
+            'original_error' => $originalError->getMessage()
+        ]);
+
+        return new ConversationTurnDTO(
+            turnNumber: 1,
+            userMessage: $userMessage,
+            systemResponse: "I'm having some technical difficulties right now. Please try again in a moment, or you can call our reception desk directly for immediate assistance.",
+            intent: new IntentDTO('UNKNOWN', 0.0, 'All processing failed'),
+            entities: EntityDTO::fromArray([]),
+            conversationState: ConversationState::DETECT_INTENT->value,
+            processingTimeMs: 0,
+            timestamp: now(),
+            metadata: ['error' => true, 'error_type' => 'complete_failure'],
+            sessionId: $sessionId
+        );
+    }
+
     private function earlyTurnDTO(
         string $sessionId,
         string $userMessage,
@@ -1214,7 +2007,8 @@ class ConversationOrchestrator
             entities: $entities ?? EntityDTO::fromArray([]),
             conversationState: $session->conversationState ?? 'DETECT_INTENT',
             processingTimeMs: 0,
-            timestamp: now()
+            timestamp: now(),
+            sessionId: $sessionId
         );
     }
 }

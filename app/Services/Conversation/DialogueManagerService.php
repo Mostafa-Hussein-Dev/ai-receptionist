@@ -8,6 +8,7 @@ use App\Contracts\LLMServiceInterface;
 use App\DTOs\IntentDTO;
 use App\DTOs\EntityDTO;
 use App\DTOs\SessionDTO;
+use App\DTOs\StructuredAIResponseDTO;
 use App\Enums\ConversationState;
 use App\Enums\IntentType;
 use Illuminate\Support\Facades\Log;
@@ -115,36 +116,33 @@ class DialogueManagerService implements DialogueManagerServiceInterface
 
             case ConversationState::SELECT_DOCTOR:
                 $collectedData = $context['collected_data'] ?? [];
-                $doctorId = $collectedData['doctor_id'] ?? null;
-                $doctorName = $collectedData['doctor_name'] ?? null;
 
-                Log::info('[DialogueManager] SELECT_DOCTOR state check', [
-                    'doctor_id' => $doctorId,
-                    'doctor_name' => $doctorName,
-                    'collected_data_keys' => array_keys($collectedData)
-                ]);
-
-                // If we have doctor_id, proceed
+                // If we have doctor_id, proceed to SELECT_DATE
                 if (isset($collectedData['doctor_id']) && !empty($collectedData['doctor_id'])) {
-                    Log::info('[DialogueManager] Proceeding to SELECT_DATE - valid doctor_id', [
-                        'doctor_id' => $collectedData['doctor_id']
-                    ]);
                     return ConversationState::SELECT_DATE->value;
                 }
 
-                // If we have doctor_name, validate it exists in database
+                // If we have doctor_name, validate it and store doctor_id
                 if (isset($collectedData['doctor_name']) && !empty($collectedData['doctor_name'])) {
                     try {
                         $doctors = $this->doctorService->searchDoctors($collectedData['doctor_name']);
 
                         if ($doctors->count() === 1) {
-                            // Exact match - proceed
+                            // Exact match - store doctor_id in session and proceed
                             $doctor = $doctors->first();
-                            Log::info('[DialogueManager] Proceeding to SELECT_DATE - doctor validated', [
+
+                            if (isset($context['session_id'])) {
+                                $sessionManager = app(\App\Services\Conversation\SessionManagerServiceInterface::class);
+                                $sessionManager->updateCollectedData($context['session_id'], [
+                                    'doctor_id' => $doctor->id
+                                ]);
+                            }
+
+                            Log::info('[DialogueManager] Doctor validated and doctor_id stored', [
                                 'doctor_name' => $collectedData['doctor_name'],
-                                'doctor_id' => $doctor->id,
-                                'validated_doctor' => "Dr. {$doctor->first_name} {$doctor->last_name}"
+                                'doctor_id' => $doctor->id
                             ]);
+
                             return ConversationState::SELECT_DATE->value;
                         } elseif ($doctors->count() > 1) {
                             // Multiple matches - stay in SELECT_DOCTOR to disambiguate
@@ -169,7 +167,7 @@ class DialogueManagerService implements DialogueManagerServiceInterface
                     }
                 }
 
-                Log::info('[DialogueManager] Staying in SELECT_DOCTOR - no doctor found');
+                // Stay in SELECT_DOCTOR if no doctor selected
                 return ConversationState::SELECT_DOCTOR->value;
 
             case ConversationState::SELECT_DATE:
@@ -181,75 +179,38 @@ class DialogueManagerService implements DialogueManagerServiceInterface
 
             case ConversationState::SHOW_AVAILABLE_SLOTS:
                 $collectedData = $context['collected_data'] ?? [];
-                $doctorId = $collectedData['doctor_id'] ?? null;
-                $date = $collectedData['date'] ?? null;
+                $userMessage = $context['user_message'] ?? '';
 
-                if ($doctorId && $date) {
-                    try {
-                        Log::info('[DialogueManager] Fetching available slots', [
-                            'doctor_id' => $doctorId,
-                            'date' => $date
-                        ]);
+                // Check if user is asking to see slots (not selecting a time)
+                $askingForSlots = stripos($userMessage, 'show') !== false ||
+                                 stripos($userMessage, 'available') !== false ||
+                                 stripos($userMessage, 'slots') !== false ||
+                                 stripos($userMessage, 'what times') !== false ||
+                                 stripos($userMessage, 'what time') !== false ||
+                                 stripos($userMessage, 'what are') !== false;
 
-                        // Get available slots from SlotService
-                        $slots = $this->slotService->getAvailableSlots($doctorId, Carbon::parse($date));
-
-                        if ($slots->isNotEmpty()) {
-                            // Format slots for display and store in session
-                            $formattedSlots = $slots->map(fn($s) => [
-                                'time' => date('h:i A', strtotime($s->start_time)),
-                                'start_time' => $s->start_time,
-                                'end_time' => $s->end_time,
-                                'slot_number' => $s->slot_number
-                            ])->toArray();
-
-                            // Create slot ranges for better display
-                            $slotRanges = $this->createSlotRanges($formattedSlots);
-
-                            Log::info('[DialogueManager] Available slots found', [
-                                'count' => $slots->count(),
-                                'formatted_slots' => $formattedSlots,
-                                'slot_ranges' => $slotRanges
-                            ]);
-
-                            // Store in session for LLM access
-                            if (isset($context['session_id'])) {
-                                $sessionManager = app(\App\Services\Conversation\SessionManagerServiceInterface::class);
-                                $sessionManager->updateCollectedData($context['session_id'], [
-                                    'available_slots' => $formattedSlots,
-                                    'slot_ranges' => $slotRanges,
-                                    'slots_count' => $slots->count()
-                                ]);
-                            }
-                        } else {
-                            Log::info('[DialogueManager] No available slots found', [
-                                'doctor_id' => $doctorId,
-                                'date' => $date
-                            ]);
-
-                            if (isset($context['session_id'])) {
-                                $sessionManager = app(\App\Services\Conversation\SessionManagerServiceInterface::class);
-                                $sessionManager->updateCollectedData($context['session_id'], [
-                                    'available_slots' => [],
-                                    'no_slots_available' => true
-                                ]);
-                            }
-                        }
-                    } catch (\Exception $e) {
-                        Log::error('[DialogueManager] Failed to fetch slots', [
-                            'doctor_id' => $doctorId,
-                            'date' => $date,
-                            'error' => $e->getMessage()
-                        ]);
-                    }
-                } else {
-                    Log::warning('[DialogueManager] Missing doctor_id or date for slot checking', [
-                        'doctor_id' => $doctorId,
-                        'date' => $date
-                    ]);
+                // If user is asking for slots, stay in SHOW_AVAILABLE_SLOTS to display them
+                if ($askingForSlots) {
+                    return ConversationState::SHOW_AVAILABLE_SLOTS->value;
                 }
 
-                return ConversationState::SELECT_SLOT->value;
+                // If user provided a specific time, move to SELECT_SLOT
+                // Check multiple sources for the time value
+                $time = $entities->time ??
+                       $context['entities']['time'] ??
+                       $collectedData['time'] ??
+                       $this->extractTimeFromMessage($userMessage);
+
+                if ($time) {
+                    Log::info('[DialogueManager] Time detected, moving to SELECT_SLOT', [
+                        'time' => $time,
+                        'source' => 'entities_or_message'
+                    ]);
+                    return ConversationState::SELECT_SLOT->value;
+                }
+
+                // Default: stay in SHOW_AVAILABLE_SLOTS to show available options
+                return ConversationState::SHOW_AVAILABLE_SLOTS->value;
 
             case ConversationState::SELECT_SLOT:
                 $collectedData = $context['collected_data'] ?? [];
@@ -277,12 +238,35 @@ class DialogueManagerService implements DialogueManagerServiceInterface
                         Log::info('[DialogueManager] Validating slot availability', [
                             'time' => $time,
                             'doctor_id' => $doctorId,
-                            'date' => $date
+                            'date' => $date,
+                            'existing_time_in_collected' => isset($collectedData['time'])
                         ]);
+
+                        // Check if user is confirming an existing time (common pattern)
+                        $isConfirmation = isset($collectedData['time']) &&
+                                       $collectedData['time'] === $time &&
+                                       $this->isConfirmationMessage($userMessage);
+
+                        if ($isConfirmation) {
+                            Log::info('[DialogueManager] User confirmed existing time - proceeding to confirmation', [
+                                'confirmed_time' => $time
+                            ]);
+                            return ConversationState::CONFIRM_BOOKING->value;
+                        }
 
                         // Check if the requested time slot is actually available
                         $availableSlots = $this->slotService->getAvailableSlots($doctorId, Carbon::parse($date));
                         $requestedTime = $this->normalizeTime($time);
+
+                        Log::info('[DialogueManager] Checking slot availability', [
+                            'requested_time' => $time,
+                            'normalized_time' => $requestedTime,
+                            'available_slots_count' => $availableSlots->count(),
+                            'sample_slots' => $availableSlots->take(5)->map(fn($s) => [
+                                'start_time' => $s->start_time,
+                                'normalized' => $this->normalizeTime($s->start_time)
+                            ])->toArray()
+                        ]);
 
                         $isSlotAvailable = $availableSlots->contains(function ($slot) use ($requestedTime) {
                             $slotTime = $this->normalizeTime($slot->start_time);
@@ -292,12 +276,14 @@ class DialogueManagerService implements DialogueManagerServiceInterface
                         if ($isSlotAvailable) {
                             Log::info('[DialogueManager] Slot is available - proceeding to confirmation', [
                                 'time' => $time,
+                                'normalized_time' => $requestedTime,
                                 'available_slots_count' => $availableSlots->count()
                             ]);
                             return ConversationState::CONFIRM_BOOKING->value;
                         } else {
                             Log::info('[DialogueManager] Requested slot not available - staying in SELECT_SLOT', [
                                 'requested_time' => $time,
+                                'normalized_time' => $requestedTime,
                                 'available_slots' => $availableSlots->take(3)->map(fn($s) => $s->start_time)->toArray()
                             ]);
                             return ConversationState::SELECT_SLOT->value;
@@ -448,6 +434,380 @@ class DialogueManagerService implements DialogueManagerServiceInterface
     }
 
     /**
+     * Enhanced dialogue management with clarification and fallback logic
+     * Processes structured AI responses and handles conversation flow
+     */
+    public function processStructuredResponse(
+        SessionDTO $session,
+        StructuredAIResponseDTO $aiResponse,
+        array $context = []
+    ): array {
+        Log::info('[DialogueManager] Processing structured AI response', [
+            'session_id' => $session->sessionId,
+            'current_state' => $session->conversationState,
+            'next_action' => $aiResponse->next_action,
+            'confidence' => $aiResponse->confidence,
+            'requires_clarification' => $aiResponse->requires_clarification,
+            'task_switch_detected' => $aiResponse->task_switch_detected
+        ]);
+
+        // Handle task switching
+        if ($aiResponse->task_switch_detected) {
+            return $this->handleTaskSwitch($session, $aiResponse, $context);
+        }
+
+        // Handle clarification requests
+        if ($aiResponse->requires_clarification) {
+            return $this->handleClarification($session, $aiResponse, $context);
+        }
+
+        // Handle low confidence scenarios
+        if ($aiResponse->confidence < 0.5 && $aiResponse->next_action === 'CONFIDENCE_LOW') {
+            return $this->handleLowConfidence($session, $aiResponse, $context);
+        }
+
+        // Handle successful processing
+        if ($aiResponse->isSuccessful()) {
+            return $this->handleSuccessfulResponse($session, $aiResponse, $context);
+        }
+
+        // Handle errors
+        if ($aiResponse->next_action === 'ERROR') {
+            return $this->handleError($session, $aiResponse, $context);
+        }
+
+        // Default handling
+        return $this->handleDefault($session, $aiResponse, $context);
+    }
+
+    /**
+     * Handle task switching scenarios
+     */
+    private function handleTaskSwitch(
+        SessionDTO $session,
+        StructuredAIResponseDTO $aiResponse,
+        array $context
+    ): array {
+        Log::info('[DialogueManager] Handling task switch', [
+            'from_intent' => $aiResponse->previous_intent,
+            'preserved_slots' => $aiResponse->slots,
+            'updated_state' => $aiResponse->updated_state
+        ]);
+
+        // Determine new state based on the task switch
+        $newState = $aiResponse->updated_state ?? $this->determineStateFromTaskSwitch($aiResponse, $session);
+
+        // Preserve relevant data from slots
+        $preservedData = $this->preserveRelevantData($session->collectedData, $aiResponse->slots);
+
+        return [
+            'state' => $newState,
+            'response' => $aiResponse->response_text,
+            'metadata' => [
+                'task_switch' => true,
+                'previous_intent' => $aiResponse->previous_intent,
+                'preserved_data' => $preservedData,
+                'action' => 'task_switch_handled'
+            ],
+            'preserved_data' => $preservedData,
+            'auto_advance' => false // Don't auto-advance after task switch
+        ];
+    }
+
+    /**
+     * Handle clarification requests
+     */
+    private function handleClarification(
+        SessionDTO $session,
+        StructuredAIResponseDTO $aiResponse,
+        array $context
+    ): array {
+        Log::info('[DialogueManager] Handling clarification request', [
+            'clarification_question' => $aiResponse->clarification_question,
+            'confidence' => $aiResponse->confidence,
+            'slots' => $aiResponse->slots
+        ]);
+
+        // Use AI-provided clarification question or generate fallback
+        $clarificationQuestion = $aiResponse->clarification_question
+            ?? $this->generateFallbackClarification($session, $aiResponse, $context);
+
+        return [
+            'state' => $session->conversationState, // Stay in current state
+            'response' => $clarificationQuestion,
+            'metadata' => [
+                'clarification_requested' => true,
+                'confidence' => $aiResponse->confidence,
+                'extracted_slots' => $aiResponse->slots,
+                'action' => 'clarification_needed'
+            ],
+            'partial_slots' => $aiResponse->slots, // Partial data extracted
+            'auto_advance' => false // Wait for user clarification
+        ];
+    }
+
+    /**
+     * Handle low confidence scenarios
+     */
+    private function handleLowConfidence(
+        SessionDTO $session,
+        StructuredAIResponseDTO $aiResponse,
+        array $context
+    ): array {
+        Log::info('[DialogueManager] Handling low confidence', [
+            'confidence' => $aiResponse->confidence,
+            'response_text' => $aiResponse->response_text
+        ]);
+
+        return [
+            'state' => $session->conversationState, // Stay in current state
+            'response' => $aiResponse->response_text,
+            'metadata' => [
+                'low_confidence' => true,
+                'confidence' => $aiResponse->confidence,
+                'action' => 'confidence_low'
+            ],
+            'auto_advance' => false
+        ];
+    }
+
+    /**
+     * Handle successful AI response
+     */
+    private function handleSuccessfulResponse(
+        SessionDTO $session,
+        StructuredAIResponseDTO $aiResponse,
+        array $context
+    ): array {
+        Log::info('[DialogueManager] Handling successful response', [
+            'next_action' => $aiResponse->next_action,
+            'updated_state' => $aiResponse->updated_state,
+            'slots' => $aiResponse->slots
+        ]);
+
+        $newState = $aiResponse->updated_state ?? $session->conversationState;
+        $autoAdvance = $this->shouldAutoAdvance($aiResponse, $session);
+
+        return [
+            'state' => $newState,
+            'response' => $aiResponse->response_text,
+            'metadata' => [
+                'success' => true,
+                'confidence' => $aiResponse->confidence,
+                'extracted_slots' => $aiResponse->slots,
+                'action' => $aiResponse->next_action
+            ],
+            'extracted_slots' => $aiResponse->slots,
+            'auto_advance' => $autoAdvance
+        ];
+    }
+
+    /**
+     * Handle error scenarios
+     */
+    private function handleError(
+        SessionDTO $session,
+        StructuredAIResponseDTO $aiResponse,
+        array $context
+    ): array {
+        Log::error('[DialogueManager] Handling AI error', [
+            'response_text' => $aiResponse->response_text,
+            'confidence' => $aiResponse->confidence
+        ]);
+
+        return [
+            'state' => $session->conversationState,
+            'response' => $aiResponse->response_text,
+            'metadata' => [
+                'error' => true,
+                'fallback_used' => true,
+                'action' => 'error_handled'
+            ],
+            'auto_advance' => false
+        ];
+    }
+
+    /**
+     * Handle default scenarios
+     */
+    private function handleDefault(
+        SessionDTO $session,
+        StructuredAIResponseDTO $aiResponse,
+        array $context
+    ): array {
+        Log::info('[DialogueManager] Handling default response', [
+            'next_action' => $aiResponse->next_action
+        ]);
+
+        // Determine next state based on current state and AI response
+        $newState = $aiResponse->updated_state ?? $this->determineNextStateDefault($session, $aiResponse);
+
+        return [
+            'state' => $newState,
+            'response' => $aiResponse->response_text,
+            'metadata' => [
+                'default_handling' => true,
+                'action' => $aiResponse->next_action
+            ],
+            'auto_advance' => false
+        ];
+    }
+
+    /**
+     * Determine state from task switch
+     */
+    private function determineStateFromTaskSwitch(StructuredAIResponseDTO $aiResponse, SessionDTO $session): string
+    {
+        // Extract intent from the AI response or context
+        $intent = $this->extractIntentFromResponse($aiResponse);
+
+        return match($intent) {
+            'BOOK_APPOINTMENT' => ConversationState::BOOK_APPOINTMENT->value,
+            'CANCEL_APPOINTMENT' => ConversationState::CANCEL_APPOINTMENT->value,
+            'RESCHEDULE_APPOINTMENT' => ConversationState::RESCHEDULE_APPOINTMENT->value,
+            'GENERAL_INQUIRY' => ConversationState::GENERAL_INQUIRY->value,
+            default => ConversationState::DETECT_INTENT->value
+        };
+    }
+
+    /**
+     * Extract intent from AI response
+     */
+    private function extractIntentFromResponse(StructuredAIResponseDTO $aiResponse): string
+    {
+        // Try to extract intent from reasoning or metadata
+        if ($aiResponse->reasoning) {
+            $reasoning = strtolower($aiResponse->reasoning);
+
+            foreach (IntentType::cases() as $intent) {
+                if (strpos($reasoning, strtolower($intent->value)) !== false) {
+                    return $intent->value;
+                }
+            }
+        }
+
+        // Fallback to next action
+        return match($aiResponse->next_action) {
+            'BOOK_APPOINTMENT' => 'BOOK_APPOINTMENT',
+            'CANCEL_APPOINTMENT' => 'CANCEL_APPOINTMENT',
+            'RESCHEDULE_APPOINTMENT' => 'RESCHEDULE_APPOINTMENT',
+            default => 'UNKNOWN'
+        };
+    }
+
+    /**
+     * Preserve relevant data during task switch
+     */
+    private function preserveRelevantData(array $existingData, array $newSlots): array
+    {
+        $preserved = [];
+
+        // Always preserve patient basic info
+        $patientFields = ['patient_name', 'date_of_birth', 'phone'];
+        foreach ($patientFields as $field) {
+            if (isset($existingData[$field])) {
+                $preserved[$field] = $existingData[$field];
+            }
+        }
+
+        // Preserve data from new slots if it's more recent
+        foreach ($newSlots as $key => $value) {
+            if ($value !== null) {
+                $preserved[$key] = $value;
+            }
+        }
+
+        return $preserved;
+    }
+
+    /**
+     * Generate fallback clarification question
+     */
+    private function generateFallbackClarification(SessionDTO $session, StructuredAIResponseDTO $aiResponse, array $context): string
+    {
+        $state = $session->conversationState;
+
+        // State-specific clarification questions
+        return match($state) {
+            'COLLECT_PATIENT_NAME' => 'Could you please spell your full name for me?',
+            'COLLECT_PATIENT_DOB' => 'Could you provide your date of birth in MM/DD/YYYY format?',
+            'COLLECT_PATIENT_PHONE' => 'Could you provide your phone number with area code?',
+            'SELECT_DOCTOR' => 'Could you please specify which doctor or department you need?',
+            'SELECT_DATE' => 'Could you please provide a specific date for your appointment?',
+            'SELECT_SLOT' => 'Could you please specify what time would work best for you?',
+            default => 'Could you please provide more details so I can help you better?'
+        };
+    }
+
+    /**
+     * Determine if conversation should auto-advance
+     */
+    private function shouldAutoAdvance(StructuredAIResponseDTO $aiResponse, SessionDTO $session): bool
+    {
+        // Don't auto-advance if clarification was needed
+        if ($aiResponse->requires_clarification) {
+            return false;
+        }
+
+        // Don't auto-advance after task switch
+        if ($aiResponse->task_switch_detected) {
+            return false;
+        }
+
+        // Don't auto-advance with low confidence
+        if ($aiResponse->confidence < 0.7) {
+            return false;
+        }
+
+        // Auto-advance if we have all required entities for current state
+        return $this->hasAllRequiredEntities($session, $aiResponse->slots);
+    }
+
+    /**
+     * Check if all required entities are present
+     */
+    private function hasAllRequiredEntities(SessionDTO $session, array $slots): bool
+    {
+        $state = $session->conversationState;
+        $collectedData = array_merge($session->collectedData, $slots);
+
+        $requiredEntities = match($state) {
+            'BOOK_APPOINTMENT' => ['patient_name', 'date_of_birth', 'phone', 'doctor_name', 'date', 'time'],
+            'CANCEL_APPOINTMENT' => ['patient_name', 'date'],
+            'RESCHEDULE_APPOINTMENT' => ['patient_name', 'date', 'time'],
+            'COLLECT_PATIENT_NAME' => ['patient_name'],
+            'COLLECT_PATIENT_DOB' => ['date_of_birth'],
+            'COLLECT_PATIENT_PHONE' => ['phone'],
+            'SELECT_DOCTOR' => ['doctor_name'],
+            'SELECT_DATE' => ['date'],
+            'SELECT_SLOT' => ['time'],
+            default => []
+        };
+
+        foreach ($requiredEntities as $entity) {
+            if (!isset($collectedData[$entity]) || empty($collectedData[$entity])) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Determine next state for default handling
+     */
+    private function determineNextStateDefault(SessionDTO $session, StructuredAIResponseDTO $aiResponse): string
+    {
+        // Use updated state if provided
+        if ($aiResponse->updated_state) {
+            return $aiResponse->updated_state;
+        }
+
+        // Stay in current state by default
+        return $session->conversationState;
+    }
+
+    /**
      * Handle state transition
      */
     public function handleStateTransition(SessionDTO $session, string $newState): array
@@ -518,8 +878,25 @@ class DialogueManagerService implements DialogueManagerServiceInterface
      */
     private function generateLLMResponse(string $state, array $context): string
     {
-        $systemPrompt = $this->buildContextAwareSystemPrompt();
-        $userPrompt = $this->buildContextAwareUserPrompt($state, $context);
+        // Performance optimization: Use LLM only for complex states
+        $simpleStates = [
+            ConversationState::GREETING->value,
+            ConversationState::COLLECT_PATIENT_NAME->value,
+            ConversationState::COLLECT_PATIENT_DOB->value,
+            ConversationState::COLLECT_PATIENT_PHONE->value,
+            ConversationState::SELECT_DOCTOR->value,
+            ConversationState::SELECT_DATE->value,
+            ConversationState::END->value,
+        ];
+
+        if (in_array($state, $simpleStates)) {
+            // Use template responses for simple states to improve performance
+            return $this->generateTemplateResponse($state, $context);
+        }
+
+        // Use optimized prompts for complex states
+        $systemPrompt = "You are a helpful AI hospital receptionist. Respond naturally and briefly.";
+        $userPrompt = $this->buildOptimizedUserPrompt($state, $context);
 
         try {
             $response = $this->llm->chat($systemPrompt, [
@@ -555,7 +932,7 @@ class DialogueManagerService implements DialogueManagerServiceInterface
             };
         }
 
-        return match (ConversationState::from($state)) {
+        $response = match (ConversationState::from($state)) {
             ConversationState::GREETING => $this->getGreeting(),
             ConversationState::BOOK_APPOINTMENT => "I'd be happy to help you book an appointment. May I have your full name?",
             ConversationState::COLLECT_PATIENT_NAME => "May I have your full name please?",
@@ -564,14 +941,125 @@ class DialogueManagerService implements DialogueManagerServiceInterface
             ConversationState::VERIFY_PATIENT => "Thank you. Which doctor would you like to see, or do you have a preference for a department?",
             ConversationState::SELECT_DOCTOR => "Which doctor would you like to see, or do you have a preference for a department?",
             ConversationState::SELECT_DATE => "What date would you like for your appointment? Please provide a specific date.",
-            ConversationState::SHOW_AVAILABLE_SLOTS => "Let me check available times for you.",
-            ConversationState::SELECT_SLOT => "What time works best for you?",
+            ConversationState::SHOW_AVAILABLE_SLOTS => $this->buildAvailableSlotsResponse($context),
+            ConversationState::SELECT_SLOT => function($context) {
+                $collectedData = $context['collected_data'] ?? [];
+                $userMessage = $context['user_message'] ?? '';
+
+                // If user just provided a time, acknowledge it instead of asking again
+                if (isset($collectedData['time']) && !empty($collectedData['time'])) {
+                    $time = $collectedData['time'];
+                    $date = $collectedData['date'] ?? 'your appointment date';
+                    $doctorName = $collectedData['doctor_name'] ?? 'your doctor';
+
+                    // Check if user is confirming or providing new time
+                    $hasTimeInMessage = preg_match('/\b(\d{1,2})(?::\d{2})?\s*(am|pm)\b/i', $userMessage);
+
+                    if ($hasTimeInMessage) {
+                        return "Thanks for confirming {$time} for {$date} with {$doctorName}. Let me check availability and confirm that for you.";
+                    } else {
+                        return "I see you'd like {$time} for your appointment. Let me check if that time slot is available for {$date} with {$doctorName}.";
+                    }
+                }
+
+                return "What time works best for you?";
+            },
             ConversationState::CONFIRM_BOOKING => "Great! Let me confirm your appointment. Is this correct?",
             ConversationState::EXECUTE_BOOKING => "Perfect! Your appointment has been booked.",
             ConversationState::CLOSING => $this->buildClosingSummary($context),
             ConversationState::END => "Thank you for calling. Have a great day!",
             default => "How may I help you?",
         };
+
+        // Handle callable responses
+        if (is_callable($response)) {
+            return $response($context);
+        }
+
+        return $response;
+    }
+
+    /**
+     * Build optimized user prompt for performance
+     */
+    private function buildOptimizedUserPrompt(string $state, array $context): string
+    {
+        $prompt = "State: {$state}\n";
+
+        // Only include essential collected data (limit to prevent token bloat)
+        if (isset($context['collected_data']) && !empty($context['collected_data'])) {
+            $essential = [];
+            $importantKeys = ['patient_name', 'doctor_name', 'date', 'time', 'phone', 'date_of_birth'];
+
+            foreach ($importantKeys as $key) {
+                if (isset($context['collected_data'][$key])) {
+                    $value = $context['collected_data'][$key];
+                    if (is_string($value) && strlen($value) > 30) {
+                        $value = substr($value, 0, 30) . '...';
+                    }
+                    $essential[$key] = $value;
+                }
+            }
+
+            if (!empty($essential)) {
+                $prompt .= "Info: " . json_encode($essential) . "\n";
+            }
+        }
+
+        // Include user message (limit length)
+        if (!empty($context['user_message'])) {
+            $userMsg = substr($context['user_message'], 0, 80);
+            $prompt .= "User: \"{$userMsg}\"\n";
+        }
+
+        return $prompt . "\nRespond naturally.";
+    }
+
+    private function buildAvailableSlotsResponse(array $context): string
+    {
+        $data = $context['collected_data'] ?? [];
+        $doctor = $data['doctor_name'] ?? 'your doctor';
+        $date = $data['date'] ?? null;
+
+        if (!$date) {
+            return "Let me check available times for you.";
+        }
+
+        // Check if we have available slots
+        if (isset($data['no_slots_available']) && $data['no_slots_available']) {
+            return "I'm sorry, there are no available slots for {$doctor} on {$date}. Would you like to try a different date?";
+        }
+
+        $availableSlots = $data['available_slots'] ?? [];
+        $slotRanges = $data['slot_ranges'] ?? [];
+
+        if (empty($availableSlots)) {
+            return "Let me check available times for you.";
+        }
+
+        // Build response with available slots
+        $response = "Here are the available times for {$doctor} on {$date}:\n\n";
+
+        if (!empty($slotRanges)) {
+            // Display slot ranges for better readability
+            foreach ($slotRanges as $range) {
+                $response .= "• {$range}\n";
+            }
+        } else {
+            // Display individual slots if no ranges
+            $count = count($availableSlots);
+            if ($count > 6) {
+                // Show first few if there are many
+                $response .= "• " . implode("\n• ", array_slice($availableSlots, 0, 6)) . "\n";
+                $response .= "• and " . ($count - 6) . " more times";
+            } else {
+                $response .= "• " . implode("\n• ", $availableSlots);
+            }
+        }
+
+        $response .= "\n\nWhat time would you prefer?";
+
+        return $response;
     }
 
     private function buildClosingSummary(array $context): string
@@ -621,12 +1109,13 @@ Your goal is to guide the caller through the appointment process step-by-step.
 
 ### What each state means (for behavior guidance)
 - **GREETING**: Give a warm greeting and ask how you may help.
+- **BOOK_APPOINTMENT**: Acknowledge booking request and ask for the patient's full name first.
 - **COLLECT_PATIENT_NAME**: Ask for the full name.
 - **COLLECT_PATIENT_DOB**: Ask for the date of birth (YYYY-MM-DD or natural language).
 - **COLLECT_PATIENT_PHONE**: Ask for the phone number.
 - **SELECT_DOCTOR**: Ask which doctor and/or Department they want to book the appointment with.
 - **SELECT_DATE**: Ask what date they prefer for the appointment.
-- **SHOW_AVAILABLE_SLOTS**: If available_slots are provided, summarize them briefly.
+- **SHOW_AVAILABLE_SLOTS**: Display the available slots clearly. Use available_slots or slot_ranges from context. If no slots available, say so and offer alternative dates.
 - **SELECT_SLOT**: Ask which of the available times works best.
 - **CONFIRM_BOOKING**: Repeat the appointment details and ask for confirmation.
 - **CLOSING**: End politely.
@@ -733,6 +1222,47 @@ PROMPT;
     }
 
     /**
+     * Extract time from message when not found in entities
+     */
+    private function extractTimeFromMessage(string $message): ?string
+    {
+        $message = strtolower(trim($message));
+
+        try {
+            // Match patterns like "10 am", "10:30 am", "10:30am", "10:30", "10am", "10 pm"
+            if (preg_match('/(\d{1,2})(?::(\d{2}))?\s*(am|pm)/', $message, $matches)) {
+                $hour = (int)$matches[1];
+                $minute = isset($matches[2]) ? (int)$matches[2] : 0;
+                $period = $matches[3] ?? 'am';
+
+                return $this->normalizeTimeFormat("{$hour}:{$minute} {$period}");
+            }
+
+            // Match patterns like "10 o'clock", "10 o'clock am"
+            if (preg_match('/(\d{1,2})\s*o\'\clock\s*(am|pm)?/', $message, $matches)) {
+                $hour = (int)$matches[1];
+                $period = $matches[2] ?? 'am';
+                return $this->normalizeTimeFormat("{$hour}:00 {$period}");
+            }
+
+            // Match simple hour patterns
+            if (preg_match('/\b(\d{1,2})\s*(am|pm)\b/', $message, $matches)) {
+                $hour = (int)$matches[1];
+                $period = $matches[2];
+                return $this->normalizeTimeFormat("{$hour}:00 {$period}");
+            }
+
+        } catch (\Exception $e) {
+            Log::warning('[DialogueManager] Time extraction failed', [
+                'message' => $message,
+                'error' => $e->getMessage()
+            ]);
+        }
+
+        return null;
+    }
+
+    /**
      * Normalize time format for comparison
      */
     private function normalizeTime(string $time): string
@@ -758,6 +1288,84 @@ PROMPT;
         // If it's already in HH:MM format, return as is
         if (preg_match('/^\d{1,2}:\d{2}$/', $time)) {
             return sprintf('%02d:%02d', ...explode(':', $time));
+        }
+
+        return $time;
+    }
+
+    /**
+     * Check if user message is a confirmation of existing data
+     */
+    private function isConfirmationMessage(string $message): bool
+    {
+        $message = strtolower(trim($message));
+
+        $confirmationPatterns = [
+            'yes', 'yeah', 'yep', 'correct', 'that\'s right', 'that\'s it',
+            'exactly', 'perfect', 'good', 'great', 'sounds good', 'sounds great',
+            'that works', 'that would work', 'that would be good', 'that would be great',
+            'confirmed', 'confirm', 'sure', 'definitely', 'absolutely',
+            'fine by me', 'ok', 'okay', 'alright'
+        ];
+
+        // Check for exact matches
+        foreach ($confirmationPatterns as $pattern) {
+            if ($message === $pattern) {
+                return true;
+            }
+        }
+
+        // Check for phrases containing confirmation words
+        foreach ($confirmationPatterns as $pattern) {
+            if (strpos($message, $pattern) !== false) {
+                return true;
+            }
+        }
+
+        // Check for specific time confirmation patterns
+        if (preg_match('/\b(\d{1,2})(?::\d{2})?\s*(am|pm)\b/', $message) &&
+            (preg_match('/\b(best|perfect|great|good|exactly|confirmed)\b/', $message) ||
+             strlen($message) < 15)) { // Short messages like "9 am", "10:30", etc.
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Normalize time format to 24-hour HH:MM
+     */
+    private function normalizeTimeFormat(string $time): string
+    {
+        $time = strtolower(trim($time));
+
+        // Handle "10 am" -> "10:00"
+        if (preg_match('/(\d{1,2})\s*(am|pm)/', $time, $matches)) {
+            $hour = (int)$matches[1];
+            $period = $matches[2];
+
+            if ($period === 'pm' && $hour !== 12) {
+                $hour += 12;
+            } elseif ($period === 'am' && $hour === 12) {
+                $hour = 0;
+            }
+
+            return sprintf('%02d:00', $hour);
+        }
+
+        // Handle "10:30 am" -> "10:30"
+        if (preg_match('/(\d{1,2}):(\d{2})\s*(am|pm)/', $time, $matches)) {
+            $hour = (int)$matches[1];
+            $minute = (int)$matches[2];
+            $period = $matches[3];
+
+            if ($period === 'pm' && $hour !== 12) {
+                $hour += 12;
+            } elseif ($period === 'am' && $hour === 12) {
+                $hour = 0;
+            }
+
+            return sprintf('%02d:%02d', $hour, $minute);
         }
 
         return $time;
