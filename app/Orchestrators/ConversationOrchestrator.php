@@ -232,10 +232,16 @@ class ConversationOrchestrator
 
                     if ($date && $time) {
                         try {
+                            // Validate booking data before execution
+                            $this->validateBookingData($session);
+
                             $appointment = $this->executeBooking($session);
 
-                            // Update session with appointment ID
-                            $this->sessionManager->update($sessionId, ['appointment_id' => $appointment->id]);
+                            // Update session with appointment ID and set proper completion state
+                            $this->sessionManager->update($sessionId, [
+                                'appointment_id' => $appointment->id,
+                                'conversation_state' => ConversationState::CLOSING->value
+                            ]);
 
                             return $this->earlyTurnDTO(
                                 $sessionId,
@@ -245,8 +251,27 @@ class ConversationOrchestrator
                                 $intent,
                                 $entities
                             );
-                        } catch (\Exception $e) {
-                            Log::error('[ConversationOrchestrator] Booking execution failed', [
+                        } catch (SlotException $e) {
+                            Log::warning('[ConversationOrchestrator] Slot validation failed during booking', [
+                                'session' => $sessionId,
+                                'error' => $e->getMessage()
+                            ]);
+
+                            // Reset to SELECT_SLOT with specific feedback
+                            $this->sessionManager->update($sessionId, [
+                                'conversation_state' => ConversationState::SELECT_SLOT->value
+                            ]);
+
+                            return $this->earlyTurnDTO(
+                                $sessionId,
+                                $userMessage,
+                                "❌ I'm sorry, that time slot is no longer available. {$e->getMessage()} Would you like to try a different time?",
+                                $session,
+                                $intent,
+                                $entities
+                            );
+                        } catch (AppointmentException $e) {
+                            Log::error('[ConversationOrchestrator] Appointment booking failed', [
                                 'session' => $sessionId,
                                 'error' => $e->getMessage()
                             ]);
@@ -254,7 +279,22 @@ class ConversationOrchestrator
                             return $this->earlyTurnDTO(
                                 $sessionId,
                                 $userMessage,
-                                "❌ I'm sorry, there was an error confirming your appointment. Please try again or contact our reception desk directly.",
+                                "❌ I couldn't complete your appointment booking: {$e->getMessage()}. Would you like to try a different date or time?",
+                                $session,
+                                $intent,
+                                $entities
+                            );
+                        } catch (\Exception $e) {
+                            Log::error('[ConversationOrchestrator] Booking execution failed', [
+                                'session' => $sessionId,
+                                'error' => $e->getMessage(),
+                                'trace' => $e->getTraceAsString()
+                            ]);
+
+                            return $this->earlyTurnDTO(
+                                $sessionId,
+                                $userMessage,
+                                "❌ I'm sorry, there was an unexpected error while confirming your appointment. Please try again or contact our reception desk directly at +961-1-234567.",
                                 $session,
                                 $intent,
                                 $entities
@@ -536,6 +576,26 @@ class ConversationOrchestrator
                             $entities
                         );
                     } else {
+                        // Check if user is referring to a specific appointment (e.g., "the 10 am one")
+                        $cancellationContext = $session->collectedData['cancellation_context'] ?? [];
+                        $matchedAppointment = $this->matchAppointmentByReference($appointments, $cancellationContext, $userMessage);
+
+                        if ($matchedAppointment) {
+                            $this->sessionManager->updateCollectedData($sessionId, [
+                                'appointment_id' => $matchedAppointment->id
+                            ]);
+
+                            return $this->earlyTurnDTO(
+                                $sessionId,
+                                $userMessage,
+                                "You have an appointment on {$matchedAppointment->date} at {$matchedAppointment->start_time}. Would you like me to cancel it? Please say 'yes' to confirm.",
+                                $session,
+                                $intent,
+                                $entities
+                            );
+                        }
+
+                        // Show all options if no specific match found
                         $options = $appointments
                             ->map(fn($a) => "{$a->date} at {$a->start_time}")
                             ->implode(', ');
@@ -614,7 +674,40 @@ class ConversationOrchestrator
             $session = $this->sessionManager->get($sessionId);
 
             // Step 6: Check if we can proceed
-            $mergedData = array_merge($session->collectedData, $entities->toArray());
+            // Fix: Filter out null values from entities to prevent overwriting collected_data
+            $entitiesArray = $entities->toArray();
+            $filteredEntities = array_filter($entitiesArray, function($value) {
+                return $value !== null && $value !== '';
+            });
+
+            // Special handling for CANCEL_APPOINTMENT state - don't overwrite booking data
+            if ($nextState === ConversationState::CANCEL_APPOINTMENT->value) {
+                // Clear stale booking data to avoid confusion during cancellation
+                $this->clearStaleBookingDataForCancellation($sessionId);
+
+                // Store cancellation references separately to avoid data contamination
+                $cancellationData = [];
+                if (!empty($filteredEntities['time'])) {
+                    $cancellationData['cancel_time'] = $filteredEntities['time'];
+                    unset($filteredEntities['time']); // Remove from main data
+                }
+                if (!empty($filteredEntities['date'])) {
+                    $cancellationData['cancel_date'] = $filteredEntities['date'];
+                    unset($filteredEntities['date']); // Remove from main data
+                }
+                if (!empty($filteredEntities['doctor'])) {
+                    $cancellationData['cancel_doctor'] = $filteredEntities['doctor'];
+                    unset($filteredEntities['doctor']); // Remove from main data
+                }
+
+                // Store cancellation context separately
+                if (!empty($cancellationData)) {
+                    $this->sessionManager->updateCollectedData($sessionId, ['cancellation_context' => $cancellationData]);
+                }
+            }
+
+            // Merge collected data with filtered entities, preserving existing data
+            $mergedData = array_merge($session->collectedData, $filteredEntities);
             $canProceed = $this->dialogueManager->canProceed($nextState, $mergedData);
 
             Log::info('[DEBUG] canProceed check', [
@@ -1427,18 +1520,29 @@ class ConversationOrchestrator
 
         // Get doctor ID from collected data
         $doctorId = $session->collectedData['doctor_id'] ?? $session->doctorId ?? null;
+        $doctor = null;
+
         if (!$doctorId && isset($session->collectedData['doctor_name'])) {
             // Look up doctor by name
-            $doctor = $this->doctorService->findByName($session->collectedData['doctor_name']);
+            $doctor = $this->doctorService->searchDoctors($session->collectedData['doctor_name'])->first();
             if ($doctor) {
                 $doctorId = $doctor->id;
             }
+        } elseif ($doctorId) {
+            // Get doctor details for slot requirements
+            $doctor = $this->doctorService->getDoctor($doctorId);
+        }
+
+        if (!$doctor) {
+            throw new \Exception('Doctor not found for booking');
         }
 
         $date = $session->collectedData['date'];
         $time = $session->collectedData['time'];
         $slotId = $session->collectedData['slot_id'] ?? null;
-        $slotCount = $session->collectedData['slot_count'] ?? 1;
+
+        // Use doctor-specific slot requirements
+        $slotCount = $doctor->slots_per_appointment ?? 1;
         $appointmentStartTime = $session->collectedData['start_time'] ?? $time;
 
         Log::info('[ConversationOrchestrator] Executing booking', [
@@ -1479,9 +1583,62 @@ class ConversationOrchestrator
     }
 
     /**
-     * Create slot ranges for display
+     * Create slot ranges for display with doctor-specific slot grouping
      */
-    private function createSlotRangesForDisplay(array $slots): array
+    private function createSlotRangesForDisplay(array $slots, array $collectedData = []): array
+    {
+        if (empty($slots)) {
+            return [];
+        }
+
+        // Sort slots by start time
+        usort($slots, function($a, $b) {
+            return strtotime($a['start_time']) - strtotime($b['start_time']);
+        });
+
+        // Get doctor-specific slot requirements
+        $doctorSlotsPerAppointment = 1; // Default
+        if (isset($collectedData['doctor_id'])) {
+            try {
+                $doctor = $this->doctorService->getDoctor($collectedData['doctor_id']);
+                if ($doctor) {
+                    $doctorSlotsPerAppointment = $doctor->slots_per_appointment ?? 1;
+                }
+            } catch (\Exception $e) {
+                Log::warning('[ConversationOrchestrator] Failed to get doctor for slot grouping', [
+                    'doctor_id' => $collectedData['doctor_id'] ?? null,
+                    'error' => $e->getMessage()
+                ]);
+            }
+        }
+
+        // Generate overlapping appointment windows using sliding window approach
+        $appointmentSlots = [];
+        $totalSlots = count($slots);
+
+        // Create sliding windows of required slot length
+        for ($i = 0; $i <= $totalSlots - $doctorSlotsPerAppointment; $i++) {
+            $startSlot = $slots[$i];
+            $endSlotIndex = $i + $doctorSlotsPerAppointment - 1;
+            $endSlot = $slots[$endSlotIndex];
+
+            $startTime = date('h:i A', strtotime($startSlot['start_time']));
+            $endTime = date('h:i A', strtotime($endSlot['end_time']));
+
+            if ($startTime !== $endTime) {
+                $appointmentSlots[] = $startTime . ' - ' . $endTime;
+            } else {
+                $appointmentSlots[] = $startTime;
+            }
+        }
+
+        return $appointmentSlots;
+    }
+
+    /**
+     * Create human-friendly conversational time ranges
+     */
+    private function createHumanFriendlyTimeRanges(array $slots): array
     {
         if (empty($slots)) {
             return [];
@@ -1494,34 +1651,35 @@ class ConversationOrchestrator
 
         $ranges = [];
         $currentRange = null;
+        $expectedNextTime = null;
 
         foreach ($slots as $slot) {
-            $time = date('h:i A', strtotime($slot['start_time']));
+            $slotStartTime = date('H:i', strtotime($slot['start_time']));
 
             if ($currentRange === null) {
-                $currentRange = ['start' => $time, 'end' => $time];
+                // Start new range
+                $currentRange = [
+                    'start' => $slotStartTime,
+                    'end' => $slotStartTime,
+                    'count' => 1
+                ];
+                $expectedNextTime = date('H:i', strtotime($slot['end_time']));
             } else {
-                // Check if this slot continues the current range (assuming 15-minute slots)
-                $currentTime = strtotime($slot['start_time']);
-                $previousTime = strtotime(end($slots)['start_time']); // This needs proper index tracking
-
-                // Simplified logic: just check consecutive slots
-                $prevSlotIndex = array_search($slot, $slots) - 1;
-                if ($prevSlotIndex >= 0) {
-                    $prevSlot = $slots[$prevSlotIndex];
-                    $prevTime = strtotime($prevSlot['start_time']);
-
-                    // If times are 15 minutes apart, continue the range
-                    if (($currentTime - $prevTime) === 900) { // 15 minutes = 900 seconds
-                        $currentRange['end'] = $time;
-                    } else {
-                        // Start new range
-                        $ranges[] = $currentRange;
-                        $currentRange = ['start' => $time, 'end' => $time];
-                    }
+                // Check if this slot continues the current range (15-minute intervals)
+                if ($slotStartTime === $expectedNextTime) {
+                    // Continue current range
+                    $currentRange['end'] = $slotStartTime;
+                    $expectedNextTime = date('H:i', strtotime($slot['end_time']));
+                    $currentRange['count']++;
                 } else {
+                    // Save current range and start new one
                     $ranges[] = $currentRange;
-                    $currentRange = ['start' => $time, 'end' => $time];
+                    $currentRange = [
+                        'start' => $slotStartTime,
+                        'end' => $slotStartTime,
+                        'count' => 1
+                    ];
+                    $expectedNextTime = date('H:i', strtotime($slot['end_time']));
                 }
             }
         }
@@ -1531,12 +1689,32 @@ class ConversationOrchestrator
             $ranges[] = $currentRange;
         }
 
-        // Format ranges as strings
-        return array_map(function($range) {
-            return $range['start'] === $range['end']
-                ? $range['start']
-                : $range['start'] . ' - ' . $range['end'];
-        }, $ranges);
+        // Convert ranges to human-friendly format
+        $humanRanges = [];
+        foreach ($ranges as $range) {
+            $startTime = date('h:i A', strtotime($range['start']));
+            $endTime = date('h:i A', strtotime($range['end'] . ' +15 minutes'));
+
+            if ($range['count'] === 1) {
+                // Single slot - show as time
+                $humanRanges[] = $startTime;
+            } else {
+                // Multiple consecutive slots - show as range
+                $humanRanges[] = $startTime . ' - ' . $endTime;
+            }
+        }
+
+        return $humanRanges;
+    }
+
+    /**
+     * Get current session ID (helper for slot display)
+     */
+    private function getCurrentSessionId(): ?string
+    {
+        // This is a workaround - we'll need to pass session ID through context
+        // For now, we'll extract from the most recent session data if available
+        return null; // Will be handled differently in proper implementation
     }
 
     /**
@@ -1558,6 +1736,54 @@ class ConversationOrchestrator
     }
 
     /**
+     * Validate booking data before execution
+     */
+    private function validateBookingData($session): void
+    {
+        $collectedData = $session->collectedData;
+        $requiredFields = ['doctor_id', 'date', 'time', 'patient_id'];
+
+        foreach ($requiredFields as $field) {
+            if (!isset($collectedData[$field]) || empty($collectedData[$field])) {
+                throw new AppointmentException("Missing required information: {$field}. Please provide all required details.");
+            }
+        }
+
+        // Additional validation for date format and future date
+        try {
+            $appointmentDate = new \Carbon\Carbon($collectedData['date']);
+            if ($appointmentDate->isPast()) {
+                throw new AppointmentException("Appointment date must be in the future.");
+            }
+        } catch (\Exception $e) {
+            throw new AppointmentException("Invalid date format. Please provide a valid date.");
+        }
+
+        // Validate time format
+        if (!$this->isValidTimeFormat($collectedData['time'])) {
+            throw new AppointmentException("Invalid time format. Please provide a valid time.");
+        }
+
+        Log::info('[ConversationOrchestrator] Booking data validation successful', [
+            'session_id' => $session->sessionId,
+            'validated_fields' => $requiredFields
+        ]);
+    }
+
+    /**
+     * Validate time format
+     */
+    private function isValidTimeFormat(string $time): bool
+    {
+        try {
+            $normalizedTime = $this->normalizeTimeFormat($time);
+            return preg_match('/^([01]?[0-9]|2[0-3]):[0-5][0-9]$/', $normalizedTime) === 1;
+        } catch (\Exception $e) {
+            return false;
+        }
+    }
+
+    /**
      * Validate slot availability before booking
      */
     private function validateSlotAvailability(int $doctorId, string $date, string $time): void
@@ -1572,27 +1798,52 @@ class ConversationOrchestrator
             // Get available slots for the doctor and date
             $availableSlots = $this->slotService->getAvailableSlots($doctorId, new \Carbon\Carbon($date));
 
-            // Check if the requested time is in the available slots
-            $requestedTime = \Carbon\Carbon::parse("{$date} {$time}:00");
-            $isAvailable = $availableSlots->contains(function ($slot) use ($requestedTime) {
-                $slotStartTime = \Carbon\Carbon::parse($slot->start_time);
-                $slotEndTime = \Carbon\Carbon::parse($slot->end_time);
+            // Normalize both times to the same format for comparison (HH:MM)
+            $normalizedRequestedTime = $this->normalizeTimeFormat($time);
 
-                // Check if requested time is within the slot (with some tolerance)
-                return $requestedTime->greaterThanOrEqualTo($slotStartTime->subMinutes(5)) &&
-                       $requestedTime->lessThanOrEqualTo($slotEndTime->addMinutes(5));
+            // Get doctor's slot requirements
+            $doctor = $this->doctorService->getDoctor($doctorId);
+            $requiredSlots = $doctor->slots_per_appointment ?? 1;
+
+            Log::info('[ConversationOrchestrator] Validating slot availability', [
+                'doctor_id' => $doctorId,
+                'required_slots' => $requiredSlots,
+                'requested_time' => $time,
+                'normalized_time' => $normalizedRequestedTime
+            ]);
+
+            // Check if the requested time slot is available and has enough consecutive slots
+            $requestedSlot = $availableSlots->first(function ($slot) use ($normalizedRequestedTime) {
+                $slotStartTime = $this->normalizeTimeFormat($slot->start_time);
+                return $slotStartTime === $normalizedRequestedTime;
             });
 
-            if (!$isAvailable) {
-                Log::warning('[ConversationOrchestrator] Slot not available', [
+            if (!$requestedSlot) {
+                throw new SlotException("The time {$time} is not available. Please select a different time.");
+            }
+
+            // Check if we have enough consecutive slots starting from the requested slot
+            $consecutiveSlots = $this->slotService->getAvailableConsecutiveSlots(
+                $doctorId,
+                new \Carbon\Carbon($date),
+                $requiredSlots
+            );
+
+            $hasRequiredSlots = $consecutiveSlots->contains(function ($slotGroup) use ($requestedSlot) {
+                return $slotGroup->first()->slot_number === $requestedSlot->slot_number;
+            });
+
+            if (!$hasRequiredSlots) {
+                Log::warning('[ConversationOrchestrator] Insufficient consecutive slots', [
                     'doctor_id' => $doctorId,
                     'date' => $date,
                     'time' => $time,
-                    'available_slots_count' => $availableSlots->count(),
-                    'available_slots' => $availableSlots->map(fn($s) => $s->start_time)->toArray()
+                    'required_slots' => $requiredSlots,
+                    'requested_slot_number' => $requestedSlot->slot_number,
+                    'available_consecutive_groups' => $consecutiveSlots->count()
                 ]);
 
-                throw new \Exception("The time slot {$time} on {$date} is no longer available. Please select a different time.");
+                throw new SlotException("The time {$time} requires {$requiredSlots} consecutive slot(s) for Dr. {$doctor->first_name} {$doctor->last_name}. Please select a different time.");
             }
 
             Log::info('[ConversationOrchestrator] Slot validation successful', [
@@ -1601,6 +1852,9 @@ class ConversationOrchestrator
                 'time' => $time
             ]);
 
+        } catch (SlotException $e) {
+            // Re-throw SlotException as is
+            throw $e;
         } catch (\Exception $e) {
             Log::error('[ConversationOrchestrator] Slot validation failed', [
                 'doctor_id' => $doctorId,
@@ -1609,8 +1863,93 @@ class ConversationOrchestrator
                 'error' => $e->getMessage()
             ]);
 
-            // Re-throw the exception with more context
-            throw new \Exception("Slot validation failed: " . $e->getMessage());
+            // Re-throw as SlotException for proper handling
+            throw new SlotException("Slot validation failed: " . $e->getMessage());
+        }
+    }
+
+    
+    /**
+     * Match appointment by user reference (e.g., "the 10 am one")
+     */
+    private function matchAppointmentByReference($appointments, array $cancellationContext, string $userMessage): ?object
+    {
+        if (empty($cancellationContext) && empty($userMessage)) {
+            return null;
+        }
+
+        // Look for time references in user message
+        $timePattern = '/(\d{1,2})(?::\d{2})?\s*(am|pm)/i';
+        if (preg_match($timePattern, $userMessage, $matches)) {
+            $hour = (int)$matches[1];
+            $period = strtolower($matches[2]);
+
+            if ($period === 'pm' && $hour !== 12) {
+                $hour += 12;
+            } elseif ($period === 'am' && $hour === 12) {
+                $hour = 0;
+            }
+
+            $referenceTime = sprintf('%02d:00:00', $hour);
+
+            // Try to match by time
+            foreach ($appointments as $appointment) {
+                if (strpos($appointment->start_time, $referenceTime) !== false) {
+                    return $appointment;
+                }
+            }
+        }
+
+        // Check cancellation context for time/date references
+        if (!empty($cancellationContext['cancel_time'])) {
+            $contextTime = $this->normalizeTimeFormat($cancellationContext['cancel_time']);
+
+            foreach ($appointments as $appointment) {
+                $appointmentTime = $this->normalizeTimeFormat($appointment->start_time);
+                if ($appointmentTime === $contextTime) {
+                    return $appointment;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Clear stale booking data when switching to cancellation flow
+     */
+    private function clearStaleBookingDataForCancellation(string $sessionId): void
+    {
+        try {
+            $session = $this->sessionManager->get($sessionId);
+            $collectedData = $session->collectedData ?? [];
+
+            // Preserve patient identity data but remove booking-specific data
+            $preservedData = [];
+            $preserveKeys = ['patient_name', 'date_of_birth', 'phone', 'patient_id'];
+
+            foreach ($preserveKeys as $key) {
+                if (isset($collectedData[$key])) {
+                    $preservedData[$key] = $collectedData[$key];
+                }
+            }
+
+            // Keep cancellation context if it exists
+            if (isset($collectedData['cancellation_context'])) {
+                $preservedData['cancellation_context'] = $collectedData['cancellation_context'];
+            }
+
+            $this->sessionManager->updateCollectedData($sessionId, $preservedData);
+
+            Log::info('[ConversationOrchestrator] Cleared stale booking data for cancellation', [
+                'preserved_keys' => array_keys($preservedData),
+                'removed_keys' => array_diff(array_keys($collectedData), array_keys($preservedData))
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('[ConversationOrchestrator] Failed to clear stale booking data', [
+                'error' => $e->getMessage()
+            ]);
         }
     }
 
@@ -1866,13 +2205,17 @@ class ConversationOrchestrator
                     // Format slots for display
                     $formattedSlots = $slots->map(fn($s) => date('h:i A', strtotime($s->start_time)))->toArray();
 
-                    // Create slot ranges for better readability
-                    $slotRanges = $this->createSlotRangesForDisplay($slots->toArray());
+                    // Create slot ranges for better readability with doctor-specific grouping
+                    $slotRanges = $this->createSlotRangesForDisplay($slots->toArray(), $collectedData);
+
+                    // Create human-friendly conversational time ranges
+                    $humanRanges = $this->createHumanFriendlyTimeRanges($slots->toArray());
 
                     // Store comprehensive slot information in session
                     $this->sessionManager->updateCollectedData($sessionId, [
                         'available_slots' => $formattedSlots,
                         'slot_ranges' => $slotRanges,
+                        'human_ranges' => $humanRanges,
                         'slots_count' => $slots->count(),
                         'slots_fetched_at' => now()->toISOString()
                     ]);

@@ -129,7 +129,7 @@ return [
         // Greeting message
         'greeting' => env(
             'PROMPT_GREETING',
-            'Thank you for calling {hospital_name}. How may I help you today?'
+            'Hello, welcome to {hospital_name}. How can I help you with your appointment today?'
         ),
 
         // Closing message

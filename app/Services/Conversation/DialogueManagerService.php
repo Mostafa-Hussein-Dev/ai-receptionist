@@ -84,6 +84,36 @@ class DialogueManagerService implements DialogueManagerServiceInterface
                     return ConversationState::VERIFY_PATIENT->value;
                 }
 
+                // Handle CONFIRM intent in DETECT_INTENT state - transition to EXECUTE_BOOKING
+                if ($intent->intent === IntentType::CONFIRM->value) {
+                    $collectedData = $context['collected_data'] ?? [];
+
+                    // Check if we have enough data to proceed with booking
+                    $hasRequiredData = isset($collectedData['doctor_id']) &&
+                                      isset($collectedData['date']) &&
+                                      isset($collectedData['time']) &&
+                                      isset($collectedData['patient_id']);
+
+                    if ($hasRequiredData) {
+                        Log::info('[DialogueManager] CONFIRM in DETECT_INTENT transitioning to EXECUTE_BOOKING', [
+                            'collected_data' => $collectedData
+                        ]);
+                        return ConversationState::EXECUTE_BOOKING->value;
+                    } else {
+                        Log::info('[DialogueManager] CONFIRM in DETECT_INTENT but insufficient data, staying in DETECT_INTENT', [
+                            'missing_data' => array_diff(['doctor_id', 'date', 'time', 'patient_id'], array_keys($collectedData))
+                        ]);
+                        // Don't get stuck in DETECT_INTENT, move to appropriate collection state
+                        return $this->getNextIncompleteStep($collectedData);
+                    }
+                }
+
+                // Handle CANCEL_APPOINTMENT intent in DETECT_INTENT state
+                if ($intent->intent === IntentType::CANCEL_APPOINTMENT->value) {
+                    Log::info('[DialogueManager] CANCEL_APPOINTMENT in DETECT_INTENT transitioning to CANCEL_APPOINTMENT');
+                    return ConversationState::CANCEL_APPOINTMENT->value;
+                }
+
                 // For other intents, use the routing logic
                 return $this->routeFromIntent($intent);
 
@@ -254,13 +284,19 @@ class DialogueManagerService implements DialogueManagerServiceInterface
                             return ConversationState::CONFIRM_BOOKING->value;
                         }
 
+                        // Get doctor information to check slot requirements
+                        $doctor = $this->doctorService->getDoctor($doctorId);
+                        $requiredSlots = $doctor->slots_per_appointment ?? 1;
+
                         // Check if the requested time slot is actually available
                         $availableSlots = $this->slotService->getAvailableSlots($doctorId, Carbon::parse($date));
                         $requestedTime = $this->normalizeTime($time);
 
-                        Log::info('[DialogueManager] Checking slot availability', [
+                        Log::info('[DialogueManager] Checking slot availability with doctor requirements', [
                             'requested_time' => $time,
                             'normalized_time' => $requestedTime,
+                            'required_slots' => $requiredSlots,
+                            'doctor_name' => $doctor->first_name . ' ' . $doctor->last_name,
                             'available_slots_count' => $availableSlots->count(),
                             'sample_slots' => $availableSlots->take(5)->map(fn($s) => [
                                 'start_time' => $s->start_time,
@@ -268,10 +304,13 @@ class DialogueManagerService implements DialogueManagerServiceInterface
                             ])->toArray()
                         ]);
 
-                        $isSlotAvailable = $availableSlots->contains(function ($slot) use ($requestedTime) {
+                        // Find the requested slot
+                        $requestedSlot = $availableSlots->first(function ($slot) use ($requestedTime) {
                             $slotTime = $this->normalizeTime($slot->start_time);
                             return $slotTime === $requestedTime;
                         });
+
+                        $isSlotAvailable = $requestedSlot && $this->hasRequiredConsecutiveSlots($availableSlots, $requestedSlot, $requiredSlots);
 
                         if ($isSlotAvailable) {
                             Log::info('[DialogueManager] Slot is available - proceeding to confirmation', [
@@ -328,7 +367,32 @@ class DialogueManagerService implements DialogueManagerServiceInterface
                 if ($intent->intent === IntentType::GOODBYE->value) {
                     return ConversationState::END->value;
                 }
-                return ConversationState::DETECT_INTENT->value;
+                // Check for new task initiation in CLOSING state
+                $userMessage = strtolower($context['user_message'] ?? '');
+
+                // Only transition to DETECT_INTENT if user explicitly starts a new task
+                $newTaskPatterns = [
+                    'book', 'make', 'schedule', 'appointment', 'cancel', 'reschedule',
+                    'change', 'check', 'help', 'need', 'want to', 'i would like'
+                ];
+
+                $isNewTask = false;
+                foreach ($newTaskPatterns as $pattern) {
+                    if (strpos($userMessage, $pattern) !== false) {
+                        $isNewTask = true;
+                        break;
+                    }
+                }
+
+                if ($isNewTask) {
+                    Log::info('[DialogueManager] New task detected in CLOSING state', [
+                        'user_message' => $context['user_message'] ?? ''
+                    ]);
+                    return ConversationState::DETECT_INTENT->value;
+                }
+
+                // Stay in CLOSING state to properly terminate the conversation
+                return ConversationState::END->value;
 
             default:
                 return ConversationState::DETECT_INTENT->value;
@@ -414,7 +478,7 @@ class DialogueManagerService implements DialogueManagerServiceInterface
      */
     public function getGreeting(): string
     {
-        return str_replace('{hospital_name}', $this->hospitalName, config('conversation.prompts.greeting'));
+        return "Hello, welcome to {$this->hospitalName}. How can I help you with your appointment today?";
     }
 
     /**
@@ -858,6 +922,39 @@ class DialogueManagerService implements DialogueManagerServiceInterface
     }
 
     /**
+     * Get next incomplete step when CONFIRM intent is received without enough data
+     */
+    private function getNextIncompleteStep(array $collectedData): string
+    {
+        if (!isset($collectedData['patient_name'])) {
+            return ConversationState::COLLECT_PATIENT_NAME->value;
+        }
+        if (!isset($collectedData['date_of_birth'])) {
+            return ConversationState::COLLECT_PATIENT_DOB->value;
+        }
+        if (!isset($collectedData['phone'])) {
+            return ConversationState::COLLECT_PATIENT_PHONE->value;
+        }
+        if (!isset($collectedData['doctor_id']) && !isset($collectedData['doctor_name'])) {
+            return ConversationState::SELECT_DOCTOR->value;
+        }
+        if (!isset($collectedData['date'])) {
+            return ConversationState::SELECT_DATE->value;
+        }
+        if (!isset($collectedData['time'])) {
+            return ConversationState::SELECT_SLOT->value;
+        }
+
+        // If all basic data exists but no patient_id, verify patient
+        if (!isset($collectedData['patient_id'])) {
+            return ConversationState::VERIFY_PATIENT->value;
+        }
+
+        // Default to DETECT_INTENT if all required data is present
+        return ConversationState::DETECT_INTENT->value;
+    }
+
+    /**
      * Route from detected intent
      */
     private function routeFromIntent(IntentDTO $intent): string
@@ -878,24 +975,13 @@ class DialogueManagerService implements DialogueManagerServiceInterface
      */
     private function generateLLMResponse(string $state, array $context): string
     {
-        // Performance optimization: Use LLM only for complex states
-        $simpleStates = [
-            ConversationState::GREETING->value,
-            ConversationState::COLLECT_PATIENT_NAME->value,
-            ConversationState::COLLECT_PATIENT_DOB->value,
-            ConversationState::COLLECT_PATIENT_PHONE->value,
-            ConversationState::SELECT_DOCTOR->value,
-            ConversationState::SELECT_DATE->value,
-            ConversationState::END->value,
-        ];
-
-        if (in_array($state, $simpleStates)) {
-            // Use template responses for simple states to improve performance
+        // Use template ONLY for the very first greeting to ensure proper welcome
+        if ($state === ConversationState::GREETING->value) {
             return $this->generateTemplateResponse($state, $context);
         }
 
-        // Use optimized prompts for complex states
-        $systemPrompt = "You are a helpful AI hospital receptionist. Respond naturally and briefly.";
+        // Use strict LLM prompt for ALL other states
+        $systemPrompt = $this->buildLLMSystemPrompt();
         $userPrompt = $this->buildOptimizedUserPrompt($state, $context);
 
         try {
@@ -934,13 +1020,13 @@ class DialogueManagerService implements DialogueManagerServiceInterface
 
         $response = match (ConversationState::from($state)) {
             ConversationState::GREETING => $this->getGreeting(),
-            ConversationState::BOOK_APPOINTMENT => "I'd be happy to help you book an appointment. May I have your full name?",
+            ConversationState::BOOK_APPOINTMENT => "I can help you book an appointment. May I have your full name?",
             ConversationState::COLLECT_PATIENT_NAME => "May I have your full name please?",
             ConversationState::COLLECT_PATIENT_DOB => "What's your date of birth?",
             ConversationState::COLLECT_PATIENT_PHONE => "What's the best phone number to reach you?",
-            ConversationState::VERIFY_PATIENT => "Thank you. Which doctor would you like to see, or do you have a preference for a department?",
-            ConversationState::SELECT_DOCTOR => "Which doctor would you like to see, or do you have a preference for a department?",
-            ConversationState::SELECT_DATE => "What date would you like for your appointment? Please provide a specific date.",
+            ConversationState::VERIFY_PATIENT => "Thank you. Which doctor would you like to see?",
+            ConversationState::SELECT_DOCTOR => "Which doctor would you like to see?",
+            ConversationState::SELECT_DATE => "What date would you like for your appointment?",
             ConversationState::SHOW_AVAILABLE_SLOTS => $this->buildAvailableSlotsResponse($context),
             ConversationState::SELECT_SLOT => function($context) {
                 $collectedData = $context['collected_data'] ?? [];
@@ -968,7 +1054,7 @@ class DialogueManagerService implements DialogueManagerServiceInterface
             ConversationState::EXECUTE_BOOKING => "Perfect! Your appointment has been booked.",
             ConversationState::CLOSING => $this->buildClosingSummary($context),
             ConversationState::END => "Thank you for calling. Have a great day!",
-            default => "How may I help you?",
+            default => "How may I help you book or manage an appointment?",
         };
 
         // Handle callable responses
@@ -1032,34 +1118,71 @@ class DialogueManagerService implements DialogueManagerServiceInterface
 
         $availableSlots = $data['available_slots'] ?? [];
         $slotRanges = $data['slot_ranges'] ?? [];
+        $humanRanges = $data['human_ranges'] ?? [];
 
         if (empty($availableSlots)) {
             return "Let me check available times for you.";
         }
 
-        // Build response with available slots
-        $response = "Here are the available times for {$doctor} on {$date}:\n\n";
+        // Build human-friendly conversational response
+        $response = "Great! For **{$doctor}** on **{$date}**, ";
 
-        if (!empty($slotRanges)) {
-            // Display slot ranges for better readability
-            foreach ($slotRanges as $range) {
-                $response .= "• {$range}\n";
-            }
+        if (!empty($humanRanges)) {
+            // Use human-friendly ranges
+            $availabilityText = $this->buildHumanAvailabilityText($humanRanges, count($availableSlots));
+            $response .= $availabilityText;
         } else {
-            // Display individual slots if no ranges
+            // Fallback to individual slots display
             $count = count($availableSlots);
-            if ($count > 6) {
-                // Show first few if there are many
-                $response .= "• " . implode("\n• ", array_slice($availableSlots, 0, 6)) . "\n";
-                $response .= "• and " . ($count - 6) . " more times";
+            if ($count > 10) {
+                $response .= "there are many available time slots throughout the day.";
             } else {
-                $response .= "• " . implode("\n• ", $availableSlots);
+                $slotsList = implode(', ', $availableSlots);
+                $response .= "available times include: {$slotsList}";
             }
         }
 
-        $response .= "\n\nWhat time would you prefer?";
+        $response .= ". What time would you prefer?";
 
         return $response;
+    }
+
+    /**
+     * Build human-friendly availability text
+     */
+    private function buildHumanAvailabilityText(array $humanRanges, int $totalSlots): string
+    {
+        if (empty($humanRanges)) {
+            return "there are {$totalSlots} available time slots";
+        }
+
+        // If we have multiple separate ranges, describe them conversationally
+        if (count($humanRanges) === 1) {
+            $range = $humanRanges[0];
+            if (strpos($range, '-') !== false) {
+                return "the doctor is available from {$range}";
+            } else {
+                return "there's availability at {$range}";
+            }
+        }
+
+        // Multiple ranges - create conversational description
+        if (count($humanRanges) <= 3) {
+            // Show all ranges if there are few
+            $rangeText = implode(', ', array_slice($humanRanges, 0, -1));
+            $lastRange = end($humanRanges);
+            return "there are openings from {$rangeText}, and also {$lastRange}";
+        } else {
+            // Show pattern for many ranges
+            $firstRange = $humanRanges[0];
+            $lastRange = $humanRanges[count($humanRanges) - 1];
+
+            if (strpos($firstRange, '-') !== false && strpos($lastRange, '-') !== false) {
+                return "the doctor is available from {$firstRange} with several time options throughout the day until {$lastRange}";
+            } else {
+                return "there are multiple time slots available throughout the day from {$firstRange} until {$lastRange}";
+            }
+        }
     }
 
     private function buildClosingSummary(array $context): string
@@ -1085,48 +1208,43 @@ class DialogueManagerService implements DialogueManagerServiceInterface
     {
         return <<<PROMPT
 You are a professional, friendly, efficient medical receptionist for {{hospital_name}}.
-Your goal is to guide the caller through the appointment process step-by-step.
+Your ONLY responsibilities are: booking appointments, canceling appointments, rescheduling appointments.
 
-### Core Responsibilities
-- Help patients book, cancel, or reschedule appointments.
-- Ask only one clear question at a time.
-- Collect missing required information gradually.
-- Keep responses short (1–2 sentences).
-- Maintain a warm, professional tone.
-- Never give medical advice.
-- Never make assumptions about information the system did not provide.
+### STRICT BEHAVIOR RULES:
+1. NEVER ask more than ONE question per response
+2. NEVER offer services outside appointments
+3. NEVER mention directions, visiting hours, departments, or other services
+4. Keep responses short (1-2 sentences maximum)
+5. Only discuss appointment-related topics
+6. Never give medical advice
 
-### Behavior Rules
-1. **Follow the conversation_state strictly.**
-2. **If required data is missing, ask ONLY for that data.**
-3. **If all required data for this state is present, acknowledge and move to the next required item.**
-4. **Do NOT jump ahead to states the system has not instructed.**
-5. **Do NOT ask irrelevant questions.**
-6. **If the patient provides extra information early, politely acknowledge and continue the expected flow.**
-7. **If the caller is unclear, ask a simple clarification question.**
-8. **Never confirm an appointment unless the system explicitly says the state is CONFIRM_BOOKING or EXECUTE_BOOKING.**
-9. **Never invent doctor names, dates, or times. Use ONLY what is provided in context.**
+### CANCELLATION SPECIFIC INSTRUCTIONS:
+- User may want to cancel single or multiple appointments
+- Listen for words like "both", "all", "cancel all", "both appointments", "all of them"
+- If user wants to cancel multiple appointments, confirm each one specifically
+- Ask "Which appointment would you like to cancel?" or "Should I cancel both appointments?"
+- Always confirm before executing cancellation
+- Provide clear confirmation after successful cancellation
 
-### What each state means (for behavior guidance)
-- **GREETING**: Give a warm greeting and ask how you may help.
-- **BOOK_APPOINTMENT**: Acknowledge booking request and ask for the patient's full name first.
-- **COLLECT_PATIENT_NAME**: Ask for the full name.
-- **COLLECT_PATIENT_DOB**: Ask for the date of birth (YYYY-MM-DD or natural language).
-- **COLLECT_PATIENT_PHONE**: Ask for the phone number.
-- **SELECT_DOCTOR**: Ask which doctor and/or Department they want to book the appointment with.
-- **SELECT_DATE**: Ask what date they prefer for the appointment.
-- **SHOW_AVAILABLE_SLOTS**: Display the available slots clearly. Use available_slots or slot_ranges from context. If no slots available, say so and offer alternative dates.
-- **SELECT_SLOT**: Ask which of the available times works best.
-- **CONFIRM_BOOKING**: Repeat the appointment details and ask for confirmation.
-- **CLOSING**: End politely.
+### FORBIDDEN EXAMPLES:
+- WRONG: "What's your full name and when would you like to come?"
+- RIGHT: "What's your full name?"
 
-### Allowed Output Format
-- Respond with natural language only.
-- Never mention system internals, states, JSON, or rules.
-- Do not output placeholders or variables.
-- Keep sentences short and friendly.
+- WRONG: "I can help you book, cancel, or get directions. What do you need?"
+- RIGHT: "I can help you with your appointment. What do you need?"
 
-Follow the rules above and generate the best next message for the caller.
+### STATE GUIDANCE:
+- BOOK_APPOINTMENT: "I can help you book an appointment. What's your full name?" (ONE question only)
+- COLLECT_PATIENT_NAME: "May I have your full name please?" (ONE question only)
+- COLLECT_PATIENT_DOB: "What's your date of birth?" (ONE question only)
+- COLLECT_PATIENT_PHONE: "What's your phone number?" (ONE question only)
+- SELECT_DOCTOR: "Which doctor would you like to see?" (ONE question only - NO departments)
+- SELECT_DATE: "What date would you like for your appointment?" (ONE question only)
+- CONFIRM_BOOKING: "Should I book this appointment for you?" (ONE question only)
+- CANCEL_APPOINTMENT: "Which appointment would you like to cancel?" (ask for specific date/time)
+- DETECT_INTENT: If CANCEL intent detected, transition to CANCEL_APPOINTMENT state
+
+You are ONLY an appointment booking assistant. Nothing more.
 PROMPT;
     }
 
@@ -1330,6 +1448,49 @@ PROMPT;
         }
 
         return false;
+    }
+
+    /**
+     * Check if slot has required consecutive slots available
+     */
+    private function hasRequiredConsecutiveSlots($availableSlots, $requestedSlot, int $requiredSlots): bool
+    {
+        if ($requiredSlots === 1) {
+            return true; // Single slot is always available if found
+        }
+
+        // Get slots starting from the requested slot number
+        $consecutiveSlots = $availableSlots
+            ->filter(function ($slot) use ($requestedSlot, $requiredSlots) {
+                return $slot->slot_number >= $requestedSlot->slot_number &&
+                       $slot->slot_number < $requestedSlot->slot_number + $requiredSlots;
+            })
+            ->sortBy('slot_number');
+
+        // Check if we have the required number of consecutive slots
+        if ($consecutiveSlots->count() !== $requiredSlots) {
+            Log::info('[DialogueManager] Not enough consecutive slots', [
+                'requested_slot_number' => $requestedSlot->slot_number,
+                'required_slots' => $requiredSlots,
+                'available_consecutive' => $consecutiveSlots->count()
+            ]);
+            return false;
+        }
+
+        // Check if slots are truly consecutive
+        $expectedSlotNumber = $requestedSlot->slot_number;
+        foreach ($consecutiveSlots as $slot) {
+            if ($slot->slot_number !== $expectedSlotNumber) {
+                Log::info('[DialogueManager] Slots are not consecutive', [
+                    'expected' => $expectedSlotNumber,
+                    'found' => $slot->slot_number
+                ]);
+                return false;
+            }
+            $expectedSlotNumber++;
+        }
+
+        return true;
     }
 
     /**
